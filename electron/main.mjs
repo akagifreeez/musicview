@@ -750,6 +750,8 @@ async function pollOnce() {
   }
 
   // Discord Rich Presence(曲/再生状態が変わったときだけ送る)
+  // 画像: Developer Portal の Assets にアップロードした "art" を使う
+  // (外部URLは Discord が拒否するため。未アップロードなら画像なしで文字のみ)
   const pkey = `${snap.videoId}|${snap.state}|${snap.title}`;
   if (pkey !== lastPresenceKey && discordClient) {
     lastPresenceKey = pkey;
@@ -758,9 +760,11 @@ async function pollOnce() {
         details: snap.title || "YouTube",
         state: snap.author || "musicview",
         startAt: snap.state === 1 ? Date.now() - snap.time * 1000 : undefined,
+        largeImage: "art",
+        largeText: snap.title || "musicview",
       });
     } else if (snap.state === 2) {
-      discordClient.update({ details: snap.title || "YouTube", state: "一時停止", force: true });
+      discordClient.update({ details: snap.title || "YouTube", state: "一時停止", largeImage: "art", force: true });
     } else {
       discordClient.clear();
     }
@@ -1406,14 +1410,17 @@ async function runProbeDiscord() {
   await sleep(5000);
   log("connected:", dc.connected);
   if (dc.connected) {
+    // アセット名 "art"(Developer Portal でアップロードした画像)があれば表示される
     dc.update({
       details: "musicview 接続テスト",
-      state: "この表示が出ればOK",
+      state: "art をアップロード済みなら画像が出る",
       startAt: Date.now() - 10000,
+      largeImage: "art",
+      largeText: "musicview",
       force: true,
     });
-    log("test presence sent — Discordのプロフィールを確認してください(8秒後に消えます)");
-    await sleep(8000);
+    log("test presence sent — Discordのプロフィールを確認してください(10秒後に消えます)");
+    await sleep(10000);
     dc.clear();
     await sleep(1000);
   }

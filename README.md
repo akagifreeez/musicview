@@ -35,13 +35,13 @@ npm run probe    # 実走E2E(YouTube実サイトで再生/キュー/検索/広�
 - メディアキー(再生/一時停止・次/前)に対応
 - 終了時に再生位置を保存し、次回その位置から復元
 
-## Discord 連携の設定(一度だけ)
+## Discord 連携の設定
 
-1. [Discord Developer Portal](https://discord.com/developers/applications) で **New Application** を作成
-2. アプリページの **General Information → Application ID** をコピー
-3. musicview の操作ドックの「Discord」ボタンから貼り付けて保存(または `data/discord.id` ファイルに保存して再起動)
+1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリを作成し、Application ID を「Discord」ボタンから保存
+2. (任意)同じポータルの **Rich Presence → Assets** で好きな画像をアップロードし、名前を **`art`** にすると、プレゼンスにその画像が付く
 
-Discord が起動していないときは自動的に待機し、起動を検出したら接続します。
+- Discord が起動していないときは自動的に待機し、起動を検出したら接続します
+- 外部URLの画像は Discord が拒否するため、曲ごとのサムネイルではなくこの固定画像方式です
 
 キーボード: Space=再生/一時停止、←/→=∓5秒(Shiftで∓30秒)、n/b=次/前の曲、m=プレイヤー⇔サイト表示。**サイト表示中はキーボードが YouTube 側に取られるため、切替は Ctrl+M かトップバー右端のボタン**
 

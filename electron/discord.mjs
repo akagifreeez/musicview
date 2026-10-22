@@ -122,7 +122,12 @@ export class DiscordPresence {
     if (a.details) activity.details = String(a.details).slice(0, 128);
     if (a.state) activity.state = String(a.state).slice(0, 128);
     if (a.startAt) activity.timestamps = { start: a.startAt };
-    // Discord RPC はコマンドに nonce(ユニークID)を要求する。無いとサーバーが黙って破棄する
+    if (a.largeImage || a.largeText) {
+      activity.assets = {};
+      // 外部URLは Discord のメディアプロキシ(mp:external)経由で渡す
+      if (a.largeImage) activity.assets.large_image = `mp:external/${a.largeImage}`;
+      if (a.largeText) activity.assets.large_text = String(a.largeText).slice(0, 128);
+    }
     this.sock.write(encode(OP.FRAME, {
       cmd: "SET_ACTIVITY",
       args: { pid: process.pid, activity },
@@ -131,12 +136,12 @@ export class DiscordPresence {
     this.log(`discord: activity sent (${String(a.details ?? "").slice(0, 40)})`);
   }
 
-  // 再生状態の反映。sameTrack=true のときは内容が変わっていなければ送らない
-  update({ details, state, startAt, force }) {
-    this.lastActivity = { details, state, startAt };
+  // 再生状態の反映。内容が変わっていなければ送らない(force で強制送信)
+  update(a) {
+    this.lastActivity = a;
     if (!this.connected) return;
-    const key = `${details}|${state}|${startAt ?? ""}`;
-    if (!force && key === this.lastKey) return;
+    const key = `${a.details}|${a.state}|${a.startAt ?? ""}|${a.largeImage ?? ""}`;
+    if (!a.force && key === this.lastKey) return;
     this.lastKey = key;
     this.sendActivity(this.lastActivity);
   }

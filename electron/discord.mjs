@@ -104,11 +104,9 @@ export class DiscordPresence {
       }, 11000);
       return;
     }
-    // コマンドへの応答(エラー診断用)
-    if (op === OP.FRAME && payload?.evt == null) {
-      if (payload?.code || payload?.message) {
-        this.log(`discord reply ERROR: code=${payload.code} message=${payload.message}`);
-      }
+    // コマンドへの応答(エラーはここに載ってくる)
+    if (op === OP.FRAME && payload?.evt === "ERROR") {
+      this.log(`discord reply ERROR: code=${payload?.data?.code} message=${payload?.data?.message}`);
     }
   }
 

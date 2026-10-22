@@ -64,6 +64,7 @@
         <h1 id="title">&nbsp;</h1>
         <div id="author">&nbsp;</div>
       </div>
+      <canvas id="viz" class="hidden" height="42"></canvas>
       <div class="progress">
         <span id="t-cur" class="time">-0:00</span>
         <input type="range" id="seek" min="0" max="1000" value="0" step="1">
@@ -74,6 +75,27 @@
         <button id="fwd30" class="icon-btn text" title="30秒進む (Shift+→)">+30秒</button>
       </div>
       <div class="aux-dock">
+        <div class="aux-dock-wrap">
+        <div id="eq-panel" class="popover hidden">
+          <div class="pop-title">イコライザー <button id="eq-close" class="pop-close">×</button></div>
+          <div id="eq-sliders"></div>
+          <div class="pop-row">
+            <span class="pop-label">プリセット</span>
+            <button class="chip" data-preset="flat">フラット</button>
+            <button class="chip" data-preset="bass">バスアップ</button>
+            <button class="chip" data-preset="clearbass">クリアバス</button>
+            <button class="chip" data-preset="vocal">ボーカル</button>
+          </div>
+        </div>
+        <div id="dc-panel" class="popover hidden">
+          <div class="pop-title">Discord Rich Presence <button id="dc-close" class="pop-close">×</button></div>
+          <p class="pop-note">Discord Developer Portal でアプリを作成し、Application ID を貼り付けて保存(一度だけ)。再生中の曲が Discord のプロフィールに表示されます。</p>
+          <div class="pop-row">
+            <input id="dc-id" type="text" placeholder="Application ID(数字)" spellcheck="false" autocomplete="off">
+            <button id="dc-save" class="btn secondary">保存</button>
+          </div>
+          <div id="dc-status" class="pop-note"></div>
+        </div>
         <div class="aux">
           <div class="vol-wrap">
             <svg viewBox="0 0 24 24" class="vol-icon"><path d="M4 9v6h4l5 4V5L8 9zM16 9c1 1 1 5 0 6"/></svg>
@@ -94,11 +116,14 @@
             <option value="8">8秒</option>
             <option value="12">12秒</option>
           </select>
+          <button id="eq-btn" class="chip" title="イコライザー / CLEAR BASS">EQ</button>
+          <button id="dc-btn" class="chip" title="Discord Rich Presence">Discord</button>
           <button id="loop" class="chip" title="この曲をループ">ループ</button>
           <button id="shuffle" class="chip" title="キューを自分で並べ替えて次へ(ミックス継続は切れる)">シャッフル</button>
           <button id="mix" class="chip accent" title="今の曲から YouTube ミックスを開始">この曲からミックス</button>
           <span id="sleep-left" class="sleep-left"></span>
         </div>
+      </div>
       </div>
     </section>
   </main>

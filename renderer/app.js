@@ -11,7 +11,10 @@ const els = {
   tCur: $("t-cur"), tDur: $("t-dur"), seek: $("seek"),
   prev: $("prev"), next: $("next"), back30: $("back30"), fwd30: $("fwd30"),
   pp: $("pp"), icPlay: $("ic-play"), icPause: $("ic-pause"),
-  vol: $("vol"), rate: $("rate"), xfade: $("xfade"), ambient: $("ambient"),
+  vol: $("vol"), rate: $("rate"), xfade: $("xfade"), ambient: $("ambient"), viz: $("viz"),
+  eqBtn: $("eq-btn"), eqPanel: $("eq-panel"), eqClose: $("eq-close"), eqSliders: $("eq-sliders"),
+  dcBtn: $("dc-btn"), dcPanel: $("dc-panel"), dcClose: $("dc-close"), dcId: $("dc-id"),
+  dcSave: $("dc-save"), dcStatus: $("dc-status"),
   loop: $("loop"), shuffle: $("shuffle"), mix: $("mix"),
   tabQueue: $("tab-queue"), tabRecs: $("tab-recs"),
   recsKind: $("recs-kind"), recsBody: $("recs-body"),
@@ -30,6 +33,25 @@ let volTouched = false;
 let durShowTotal = false; // 残り時間(-表記)と総時間の切り替え
 let queueScrolledVid = null; // キューの自動スクロール用(曲替わりの一度だけ)
 let mixPendingShown = null;
+let eqGainsLocal = [0, 0, 0, 0, 0];
+let eqSendTimer = null;
+let vizTarget = null;    // メインから届いた解析値
+let vizLevels = null;    // 描画中の値(補間用)
+
+// renderer 側のEQメタ(lib/eq.mjs と同じ値)
+const EQ_META = [
+  { label: "CLEAR BASS", min: -12, max: 15 },
+  { label: "LOW", min: -12, max: 12 },
+  { label: "MID", min: -12, max: 12 },
+  { label: "HIGH", min: -12, max: 12 },
+  { label: "AIR", min: -12, max: 12 },
+];
+const EQ_PRESETS = {
+  flat: [0, 0, 0, 0, 0],
+  bass: [8, 3, -1, 0, 1],
+  clearbass: [14, 2, -2, 0, 2],
+  vocal: [-2, -1, 3, 4, 1],
+};
 
 // ── 表示ユーティリティ ────────────────────────
 function fmt(sec) {
@@ -57,6 +79,74 @@ async function poll() {
 // スライダーの左側をアクセントで塗る(Apple Music 風)
 function paintRange(el, pct) {
   el.style.background = `linear-gradient(to right, var(--accent) ${pct}%, var(--fill) ${pct}%)`;
+}
+
+// ── EQパネル ────────────────────────────────
+function buildEqPanel() {
+  els.eqSliders.innerHTML = EQ_META.map((b, i) => `
+    <div class="eq-row">
+      <span class="eq-label">${b.label}</span>
+      <input type="range" class="eq-range" data-i="${i}" min="${b.min}" max="${b.max}" step="1" value="0">
+      <span class="eq-val" data-v="${i}">0</span>
+    </div>`).join("");
+  els.eqSliders.querySelectorAll(".eq-range").forEach(r => {
+    paintRange(r, ((Number(r.value) - Number(r.min)) / (Number(r.max) - Number(r.min))) * 100);
+    r.addEventListener("input", () => {
+      const i = Number(r.dataset.i);
+      eqGainsLocal[i] = Number(r.value);
+      els.eqSliders.querySelector(`[data-v="${i}"]`).textContent = r.value;
+      paintRange(r, ((Number(r.value) - Number(r.min)) / (Number(r.max) - Number(r.min))) * 100);
+      clearTimeout(eqSendTimer);
+      eqSendTimer = setTimeout(() => window.musicview.setEq(eqGainsLocal.slice()), 150);
+    });
+  });
+  document.querySelectorAll("#eq-panel [data-preset]").forEach(b => {
+    b.addEventListener("click", () => {
+      eqGainsLocal = EQ_PRESETS[b.dataset.preset].slice();
+      syncEqUI(eqGainsLocal);
+      window.musicview.setEq(eqGainsLocal.slice());
+    });
+  });
+}
+
+function syncEqUI(gains) {
+  eqGainsLocal = gains.slice();
+  els.eqSliders.querySelectorAll(".eq-range").forEach(r => {
+    const i = Number(r.dataset.i);
+    r.value = gains[i];
+    paintRange(r, ((Number(r.value) - Number(r.min)) / (Number(r.max) - Number(r.min))) * 100);
+  });
+  els.eqSliders.querySelectorAll("[data-v]").forEach(v => { v.textContent = String(gains[Number(v.dataset.v)]); });
+}
+
+// ── ビジュアライザー ────────────────────────
+window.musicview.onViz(d => { vizTarget = d; });
+
+function drawViz() {
+  requestAnimationFrame(drawViz);
+  const on = snap?.ok && snap.viz && snap?.snap?.state === 1;
+  els.viz.classList.toggle("hidden", !on);
+  if (!on) return;
+  const w = els.viz.clientWidth, h = 42, dpr = window.devicePixelRatio || 1;
+  if (els.viz.width !== Math.round(w * dpr)) {
+    els.viz.width = Math.round(w * dpr);
+    els.viz.height = Math.round(h * dpr);
+  }
+  const ctx = els.viz.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!vizTarget) return;
+  if (!vizLevels || vizLevels.length !== vizTarget.length) vizLevels = vizTarget.slice();
+  const n = vizLevels.length, bw = w / n;
+  for (let i = 0; i < n; i++) {
+    vizLevels[i] += (vizTarget[i] - vizLevels[i]) * 0.45;
+    const bh = Math.max(2, (vizLevels[i] / 100) * h);
+    const g = ctx.createLinearGradient(0, h - bh, 0, h);
+    g.addColorStop(0, "rgba(252,60,68,0.95)");
+    g.addColorStop(1, "rgba(252,60,68,0.20)");
+    ctx.fillStyle = g;
+    ctx.fillRect(i * bw + 1, h - bh, bw - 2, bh);
+  }
 }
 
 function render() {
@@ -137,6 +227,11 @@ function render() {
     mixPendingShown = pending;
     els.mix.textContent = pending ? "ミックス切替中…" : "この曲からミックス";
     els.mix.classList.toggle("on", pending);
+  }
+
+  // EQパネルが開いているときは値を同期(スライダー触っていないときだけ)
+  if (!els.eqPanel.classList.contains("hidden") && document.activeElement?.classList?.contains("eq-range") !== true) {
+    syncEqUI(s.eq ?? [0, 0, 0, 0, 0]);
   }
 
   // モードはイベントだけでなくポーリングでも同期する(push取りこぼしで
@@ -326,6 +421,28 @@ els.importBtn.addEventListener("click", async () => {
   setTimeout(() => { btn.textContent = "取り込み"; btn.disabled = false; }, 4000);
 });
 
+// ── EQ / Discord パネル ──────────────────────
+els.eqBtn.addEventListener("click", () => {
+  els.eqPanel.classList.toggle("hidden");
+  els.dcPanel.classList.add("hidden");
+  if (!els.eqPanel.classList.contains("hidden")) syncEqUI(snap?.eq ?? [0, 0, 0, 0, 0]);
+});
+els.eqClose.addEventListener("click", () => els.eqPanel.classList.add("hidden"));
+els.dcBtn.addEventListener("click", () => {
+  els.dcPanel.classList.toggle("hidden");
+  els.eqPanel.classList.add("hidden");
+  if (!els.dcPanel.classList.contains("hidden")) {
+    window.musicview.getDiscordId().then(id => { els.dcId.value = id ?? ""; });
+  }
+});
+els.dcClose.addEventListener("click", () => els.dcPanel.classList.add("hidden"));
+els.dcSave.addEventListener("click", async () => {
+  const r = await window.musicview.setDiscordId(els.dcId.value.trim());
+  els.dcStatus.textContent = r.saved
+    ? "保存しました(Discord起動中なら数秒で反映)"
+    : "IDを消去しました";
+});
+
 // ── モード ────────────────────────────────────
 function setMode(m) {
   mode = m;
@@ -366,5 +483,7 @@ window.addEventListener("keydown", (e) => {
 els.loop.classList.toggle("on", loopOn);
 els.shuffle.classList.toggle("on", shuffleOn);
 window.musicview.setLoop(loopOn);
+buildEqPanel();
+drawViz();
 setInterval(poll, 500);
 poll();

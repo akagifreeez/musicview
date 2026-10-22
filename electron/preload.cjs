@@ -16,6 +16,11 @@ contextBridge.exposeInMainWorld("musicview", {
   shuffleNext: () => ipcRenderer.invoke("mv:shuffle-next"),
   setXfade: (sec) => ipcRenderer.invoke("mv:set-xfade", sec),
   setLoop: (on) => ipcRenderer.invoke("mv:set-loop", on),
+  setEq: (gains) => ipcRenderer.invoke("mv:set-eq", gains),
+  setViz: (on) => ipcRenderer.invoke("mv:set-viz", on),
+  getDiscordId: () => ipcRenderer.invoke("mv:dc-id-get"),
+  setDiscordId: (id) => ipcRenderer.invoke("mv:dc-id-set", id),
+  onViz: (fn) => ipcRenderer.on("mv:viz", (_e, d) => fn(d)),
   onRecs: (fn) => ipcRenderer.on("mv:recs", (_e, d) => fn(d)),
   onMode: (fn) => ipcRenderer.on("mv:mode", (_e, m) => fn(m)),
 });

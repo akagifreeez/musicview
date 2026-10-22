@@ -67,12 +67,72 @@ export const SITE_BOOTSTRAP = `
       else if (name === "prev") el.previousVideo();
       else if (name === "playAt") el.playVideoAt(Number(arg) || 0);
       else if (name === "load") el.loadVideoById(String(arg));
+      else if (name === "eq") return ctlEq(arg);
       else return "unknown";
       return "ok";
     } catch (e) { return "error"; }
   };
-  if (window.__mvCtl) { window.__mvCtl.snap = snap; window.__mvCtl.cmd = cmd; window.__mvCtl.skipTick = skipTick; return; }
-  window.__mvCtl = { snap: snap, cmd: cmd, skipTick: skipTick };
+  // ── Web Audio(EQ/ビジュアライザー用)──
+  // グラフは window.__mvAudio に永続させる。createMediaElementSource は同じ要素に
+  // 2回呼べず、再注入でクロージャを作り直すと例外でEQ/解析が死ぬため
+  var audio = window.__mvAudio || null;
+  function ensureAudio() {
+    if (audio) return true;
+    try {
+      var v = document.querySelector("video.html5-main-video");
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!v || !AC) return false;
+      var ctx = new AC();
+      var src = ctx.createMediaElementSource(v);
+      var defs = [[60, "lowshelf"], [250, "peaking"], [1000, "peaking"], [3500, "peaking"], [10000, "highshelf"]];
+      var bands = [];
+      var node = src;
+      for (var i = 0; i < defs.length; i++) {
+        var f = ctx.createBiquadFilter();
+        f.type = defs[i][1];
+        f.frequency.value = defs[i][0];
+        f.Q.value = 1;
+        f.gain.value = 0;
+        node.connect(f);
+        node = f;
+        bands.push(f);
+      }
+      var an = ctx.createAnalyser();
+      an.fftSize = 256;
+      an.smoothingTimeConstant = 0.82;
+      node.connect(an);
+      an.connect(ctx.destination);
+      audio = { ctx: ctx, bands: bands, an: an, buf: new Uint8Array(an.frequencyBinCount) };
+      audioEl = v;
+      window.__mvAudio = audio; // 診断・probe から参照できるように公開
+      if (ctx.state === "suspended") { try { ctx.resume(); } catch (e) {} }
+      return true;
+    } catch (e) { return false; }
+  }
+  function ctlEq(gains) {
+    if (!ensureAudio() || !audio) return "no-audio";
+    if (!Array.isArray(gains)) return "bad-args";
+    for (var i = 0; i < audio.bands.length; i++) {
+      var g = Number(gains[i]) || 0;
+      audio.bands[i].gain.value = g;
+    }
+    return "ok";
+  }
+  function ctlLevels(n) {
+    if (!ensureAudio() || !audio) return null;
+    n = Math.min(64, Math.max(4, Number(n) || 28));
+    audio.an.getByteFrequencyData(audio.buf);
+    var out = [], per = Math.floor(audio.buf.length / n);
+    for (var i = 0; i < n; i++) {
+      var sum = 0;
+      for (var j = 0; j < per; j++) sum += audio.buf[i * per + j];
+      var v = Math.round((sum / per) * 100 / 255 * (1 + (i / n) * 0.9));
+      out.push(Math.min(100, v));
+    }
+    return out;
+  }
+  if (window.__mvCtl) { window.__mvCtl.snap = snap; window.__mvCtl.cmd = cmd; window.__mvCtl.skipTick = skipTick; window.__mvCtl.levels = ctlLevels; return; }
+  window.__mvCtl = { snap: snap, cmd: cmd, skipTick: skipTick, levels: ctlLevels };
   setInterval(function () { window.__mvCtl.skipTick(); }, 400);
 })();
 `;

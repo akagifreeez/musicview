@@ -11,8 +11,10 @@ import { extractVideoId, mixUrl, watchUrl, searchUrl, thumbUrl } from "../lib/ur
 import { normalizeQueue, shuffledOrder, nextShuffled } from "../lib/queue.mjs";
 import { parseRecResults, parseDomItems, parseQueueItems, parseGenericItems } from "../lib/recs.mjs";
 import { makeSnapshot, validateSnapshot } from "../lib/restore.mjs";
+import { clampGains, isFlat } from "../lib/eq.mjs";
 import { SITE_BOOTSTRAP, EXTRACT_ITEMS, AD_HIDE_CSS, VISIBILITY_PATCH } from "./inject.mjs";
 import { importYoutubeCookies } from "./browser-import.mjs";
+import { DiscordPresence } from "./discord.mjs";
 
 const require = createRequire(import.meta.url);
 const { AdblockEngine } = require("./adblock.cjs");
@@ -34,7 +36,8 @@ const IS_IMPORT_PROBE = argv.includes("--probe-import");
 // サイト表示時の実際の見た目(トップバーの可視性)をデスクトップごと撮って確認する
 const IS_DESKTOP_PROBE = argv.includes("--probe-desktop");
 const IS_XFADE_PROBE = argv.includes("--probe-xfade");
-const IS_ANY_PROBE = IS_PROBE || IS_IMPORT_PROBE || IS_DESKTOP_PROBE || IS_XFADE_PROBE;
+const IS_AUDIO_PROBE = argv.includes("--probe-audio");
+const IS_ANY_PROBE = IS_PROBE || IS_IMPORT_PROBE || IS_DESKTOP_PROBE || IS_XFADE_PROBE || IS_AUDIO_PROBE;
 // 広告ブロックが再生を詰まらせているかの切り分け用(musicview: adblock off で起動)
 const ADBLOCK_OFF = process.env.MUSICVIEW_NO_ADBLOCK === "1";
 const PARTITION = IS_PROBE ? "persist:musicview-probe" : "persist:musicview";
@@ -234,6 +237,10 @@ async function injectInto(wc) {
   try {
     await wc.executeJavaScript(VISIBILITY_PATCH + "\n" + SITE_BOOTSTRAP);
     await wc.insertCSS(AD_HIDE_CSS);
+    // EQ/ビジュアライザーを使う設定のときはオーディオグラフを接続してゲインを反映
+    if (!isFlat(eqGains) || vizOn) {
+      await wc.executeJavaScript(`window.__mvCtl && window.__mvCtl.cmd("eq", ${JSON.stringify(eqGains)})`);
+    }
   } catch { /* 遷移直後のレースは無視(次の poll で再注入される) */
   }
 }
@@ -432,6 +439,18 @@ let lastRecsIds = [];   // おすすめ欄のID(キュー末端の補充に使�
 let desiredVol = 100;   // アプリ側が管理する音量/速度(遷移しても YouTube の記憶値に戻されない)
 let desiredRate = 1;
 let xfadeCooldownUntil = 0; // キャンセル直後の再開を抑える(シーク連打などでのチャーン防止)
+let vizPump = null;
+let eqGains = [0, 0, 0, 0, 0]; // 5バンドEQ(60Hz lowshelf が CLEAR BASS 相当)
+let vizOn = true;       // ビジュアライザー(解析値をUIへ送って描画)
+let discordClient = null;
+let lastPresenceKey = "";
+
+// EQ/ビジュアライザーのゲインをビューへ反映(注入直後と設定変更時に呼ぶ)
+async function applyAudioTo(view) {
+  if (isFlat(eqGains) && !vizOn) return;
+  if (!view || view.webContents.isDestroyed()) return;
+  await execOn(view, `window.__mvCtl && window.__mvCtl.cmd("eq", ${JSON.stringify(eqGains)})`);
+}
 
 function ensureXfadeView() {
   if (xfadeView && !xfadeView.webContents.isDestroyed()) {
@@ -729,6 +748,23 @@ async function pollOnce() {
     await execCmd("vol", desiredVol);
   }
 
+  // Discord Rich Presence(曲/再生状態が変わったときだけ送る)
+  const pkey = `${snap.videoId}|${snap.state}|${snap.title}`;
+  if (pkey !== lastPresenceKey && discordClient) {
+    lastPresenceKey = pkey;
+    if (snap.state === 1 || snap.state === 3) {
+      discordClient.update({
+        details: snap.title || "YouTube",
+        state: snap.author || "musicview",
+        startAt: snap.state === 1 ? Date.now() - snap.time * 1000 : undefined,
+      });
+    } else if (snap.state === 2) {
+      discordClient.update({ details: snap.title || "YouTube", state: "一時停止", force: true });
+    } else {
+      discordClient.clear();
+    }
+  }
+
   // 現在曲の曲名はプレイヤーから直に取れる(oEmbed を待たずにキュー表示が埋まる)
   if (snap.title && !titles.get(snap.videoId)?.title) {
     titles.set(snap.videoId, { title: snap.title, author: snap.author });
@@ -804,6 +840,9 @@ async function pollOnce() {
     xfadeSec,
     loopOn,
     xfading: !!xfade,
+    eq: eqGains,
+    viz: vizOn,
+    discord: discordClient?.connected ? "on" : (discordClient ? "off" : "no-id"),
     thumb: thumbUrl(snap.videoId, "maxres"),
     queueItems: q.map(id => ({ id, title: titles.get(id)?.title ?? null, author: titles.get(id)?.author ?? null })),
   };
@@ -824,6 +863,8 @@ async function saveSession() {
       rate: desiredRate,
       mode,
       xfade: xfadeSec,
+      eq: eqGains,
+      viz: vizOn,
     });
     if (!s) return;
     sessionData = s;
@@ -904,6 +945,42 @@ function registerIpc() {
     loopOn = !!on;
     if (loopOn) cancelXfade("loop on");
     return loopOn;
+  });
+
+  ipcMain.handle("mv:set-eq", (_e, gains) => {
+    eqGains = clampGains(gains);
+    applyAudioTo(site);
+    applyAudioTo(xfadeView);
+    saveSession();
+    return eqGains;
+  });
+
+  ipcMain.handle("mv:set-viz", (_e, on) => {
+    vizOn = !!on;
+    if (!vizOn) win?.webContents.send("mv:viz", null); // UIを止めるシグナル
+    saveSession();
+    return vizOn;
+  });
+
+  ipcMain.handle("mv:dc-id-get", async () => {
+    try {
+      return (await fs.readFile(path.join(DATA_DIR, "discord.id"), "utf8")).trim();
+    } catch { return ""; }
+  });
+
+  ipcMain.handle("mv:dc-id-set", (_e, id) => {
+    const clean = String(id ?? "").trim();
+    discordClient?.close();
+    discordClient = null;
+    lastPresenceKey = "";
+    if (clean && /^\d+$/.test(clean)) {
+      fs.writeFile(path.join(DATA_DIR, "discord.id"), clean, "utf8").catch(() => {});
+      discordClient = new DiscordPresence(clean, (...a) => console.log("musicview: discord", ...a));
+      discordClient.start();
+      return { ok: true, saved: true };
+    }
+    try { fs.rm(path.join(DATA_DIR, "discord.id"), { force: true }); } catch { /* 無視 */ }
+    return { ok: true, saved: false };
   });
 
   ipcMain.handle("mv:navigate", (_e, url) => {
@@ -1266,6 +1343,57 @@ async function runProbeXfade() {
   app.exit(0);
 }
 
+// ビジュアライザー: 主役ビューの解析値をUIへ送る(約11fps、UI側で補間して描画)
+function ensureVizPump() {
+  if (vizPump) return;
+  vizPump = setInterval(async () => {
+    if (!vizOn || !site || site.webContents.isDestroyed()) return;
+    try {
+      const lv = await site.webContents.executeJavaScript(
+        `(function () {
+          if (!window.__mvCtl) return null;
+          var s = window.__mvCtl.snap();
+          return (s && (s.state === 1 || s.state === 3)) ? window.__mvCtl.levels(28) : null;
+        })()`,
+      );
+      if (Array.isArray(lv)) win?.webContents.send("mv:viz", lv);
+    } catch { /* 無視 */ }
+  }, 90);
+}
+
+// EQ/ビジュアライザーの実走確認: 再生中のページにオーディオグラフを接続し、
+// ゲイン反映と解析値の流れを確認する
+async function runProbeAudio() {
+  const log = (...a) => console.log("probe-audio:", ...a);
+  await sleep(1500);
+  ensureSite();
+  site.webContents.loadURL(watchUrl("dQw4w9WgXcQ"));
+  let s = null;
+  for (let i = 0; i < 14; i++) {
+    await sleep(2500);
+    s = await pollOnce();
+    if (s?.ok && s.snap.state === 1 && s.snap.dur > 0) break;
+  }
+  log("playing:", s?.snap?.videoId, "state:", s?.snap?.state);
+  if (!s?.ok) { app.exit(1); return; }
+  eqGains = clampGains([12, 2, -2, 0, 2]);
+  await applyAudioTo(site);
+  await sleep(2500);
+  const chk = await execOn(site, `JSON.stringify({
+    has: !!window.__mvAudio,
+    g0: window.__mvAudio ? window.__mvAudio.bands[0].gain.value : null,
+    g2: window.__mvAudio ? window.__mvAudio.bands[2].gain.value : null,
+    lv: window.__mvCtl ? window.__mvCtl.levels(8) : null
+  })`);
+  log("audio:", chk);
+  const r = await pollOnce();
+  log("viz:", vizOn, "pump-sent:", r?.ok, "levels-via-renderer:", "see-ui");
+  setMode("music");
+  await sleep(1500);
+  await probeShot(win.webContents, path.join(DATA_DIR, "probe", "probe-audio.png"));
+  app.exit(0);
+}
+
 // ── 起動 ──────────────────────────────────────
 app.whenReady().then(async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -1279,6 +1407,20 @@ app.whenReady().then(async () => {
   xfadeSec = sessionData?.xfade ?? 0; // クロスフェード秒数は保存済み設定を引き継ぐ
   desiredVol = sessionData?.vol ?? 100;
   desiredRate = sessionData?.rate ?? 1;
+  eqGains = sessionData?.eq ?? [0, 0, 0, 0, 0];
+  vizOn = sessionData?.viz !== false;
+  // Discord Rich Presence(data/discord.id にアプリケーションIDがあれば有効)
+  try {
+    const dcId = (await fs.readFile(path.join(DATA_DIR, "discord.id"), "utf8")).trim();
+    if (/^\d+$/.test(dcId)) {
+      discordClient = new DiscordPresence(dcId, (...a) => console.log("musicview: discord", ...a));
+      discordClient.start();
+    } else {
+      console.log("musicview: discord presence disabled (no client id in data/discord.id)");
+    }
+  } catch { /* ファイル無し=無効 */ }
+  eqGains = sessionData?.eq ?? [0, 0, 0, 0, 0];
+  vizOn = sessionData?.viz !== false;
   registerIpc();
   if (ADBLOCK_OFF) {
     console.log("musicview: adblock OFF (MUSICVIEW_NO_ADBLOCK=1)");
@@ -1289,6 +1431,7 @@ app.whenReady().then(async () => {
   createWindow();
   if (sessionData || bootHasSession) ensureSite();
   applyMode();
+  ensureVizPump();
 
   if (!IS_ANY_PROBE) {
     globalShortcut.register("MediaPlayPause", async () => {
@@ -1305,6 +1448,7 @@ app.whenReady().then(async () => {
   if (IS_IMPORT_PROBE) runProbeImport().catch(e => { console.error("probe-import error:", e); app.exit(1); });
   if (IS_DESKTOP_PROBE) runProbeDesktop().catch(e => { console.error("probe-desktop error:", e); app.exit(1); });
   if (argv.includes("--probe-xfade")) runProbeXfade().catch(e => { console.error("probe-xfade error:", e); app.exit(1); });
+  if (IS_AUDIO_PROBE) runProbeAudio().catch(e => { console.error("probe-audio error:", e); app.exit(1); });
 });
 
 app.on("window-all-closed", () => app.quit());

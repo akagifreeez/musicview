@@ -4,6 +4,7 @@
 // クライアントIDは Discord Developer Portal で作成したアプリケーションIDを使用する。
 import net from "node:net";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 
 const OP = { HANDSHAKE: 0, FRAME: 1, CLOSE: 2, PING: 3, PONG: 4 };
@@ -121,9 +122,11 @@ export class DiscordPresence {
     if (a.details) activity.details = String(a.details).slice(0, 128);
     if (a.state) activity.state = String(a.state).slice(0, 128);
     if (a.startAt) activity.timestamps = { start: a.startAt };
+    // Discord RPC はコマンドに nonce(ユニークID)を要求する。無いとサーバーが黙って破棄する
     this.sock.write(encode(OP.FRAME, {
       cmd: "SET_ACTIVITY",
       args: { pid: process.pid, activity },
+      nonce: crypto.randomUUID(),
     }));
     this.log(`discord: activity sent (${String(a.details ?? "").slice(0, 40)})`);
   }

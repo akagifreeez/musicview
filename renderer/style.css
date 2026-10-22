@@ -375,7 +375,7 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.18); }
 }
 
 /* ビジュアライザー */
-#viz { width: min(620px, 100%); height: 42px; display: block; }
+#viz { width: min(620px, 100%); height: 56px; display: block; }
 
 .eq-row { display: flex; align-items: center; gap: 10px; margin: 7px 0; }
 .eq-label { font-size: 11px; color: var(--label-secondary); width: 84px; flex: none; }

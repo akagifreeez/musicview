@@ -122,12 +122,13 @@ function syncEqUI(gains) {
 // ── ビジュアライザー ────────────────────────
 window.musicview.onViz(d => { vizTarget = d; });
 
+const vizPeaks = new Array(28).fill(0);   // ピークマーカー(ゆっくり落下)
 function drawViz() {
   requestAnimationFrame(drawViz);
   const on = snap?.ok && snap.viz && snap?.snap?.state === 1;
   els.viz.classList.toggle("hidden", !on);
   if (!on) return;
-  const w = els.viz.clientWidth, h = 42, dpr = window.devicePixelRatio || 1;
+  const w = els.viz.clientWidth, h = 56, dpr = window.devicePixelRatio || 1;
   if (els.viz.width !== Math.round(w * dpr)) {
     els.viz.width = Math.round(w * dpr);
     els.viz.height = Math.round(h * dpr);
@@ -136,16 +137,26 @@ function drawViz() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   if (!vizTarget) return;
-  if (!vizLevels || vizLevels.length !== vizTarget.length) vizLevels = vizTarget.slice();
+  if (!vizLevels || vizLevels.length !== vizTarget.length) {
+    vizLevels = vizTarget.slice();
+    vizPeaks.fill(0);
+  }
   const n = vizLevels.length, bw = w / n;
   for (let i = 0; i < n; i++) {
-    vizLevels[i] += (vizTarget[i] - vizLevels[i]) * 0.45;
-    const bh = Math.max(2, (vizLevels[i] / 100) * h);
+    // 立ち上がりは速く、落下はゆっくり(躍動感のある動き)
+    const t = vizTarget[i];
+    vizLevels[i] += (t - vizLevels[i]) * (t > vizLevels[i] ? 0.55 : 0.16);
+    vizPeaks[i] = Math.max(vizPeaks[i] - 0.55, vizLevels[i]);
+    const bh = Math.max(3, Math.pow(vizLevels[i] / 100, 1.15) * (h - 6));
+    const ph = Math.max(3, Math.pow(vizPeaks[i] / 100, 1.15) * (h - 6));
     const g = ctx.createLinearGradient(0, h - bh, 0, h);
-    g.addColorStop(0, "rgba(252,60,68,0.95)");
-    g.addColorStop(1, "rgba(252,60,68,0.20)");
+    g.addColorStop(0, "rgba(252,60,68,0.98)");
+    g.addColorStop(1, "rgba(252,60,68,0.16)");
     ctx.fillStyle = g;
     ctx.fillRect(i * bw + 1, h - bh, bw - 2, bh);
+    // ピークマーカー
+    ctx.fillStyle = "rgba(255,255,255,0.65)";
+    ctx.fillRect(i * bw + 1, h - ph - 2, bw - 2, 2);
   }
 }
 

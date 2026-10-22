@@ -99,7 +99,7 @@ export const SITE_BOOTSTRAP = `
       }
       var an = ctx.createAnalyser();
       an.fftSize = 256;
-      an.smoothingTimeConstant = 0.82;
+      an.smoothingTimeConstant = 0.70; // 躍動感優先(潰れた波形にならないようやや低め)
       node.connect(an);
       an.connect(ctx.destination);
       audio = { ctx: ctx, bands: bands, an: an, buf: new Uint8Array(an.frequencyBinCount) };

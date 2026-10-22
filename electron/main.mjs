@@ -762,6 +762,7 @@ async function pollOnce() {
         startAt: snap.state === 1 ? Date.now() - snap.time * 1000 : undefined,
         largeImage: "art",
         largeText: snap.title || "musicview",
+        type: 2, // LISTENING(〜を再生中)
         buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
       });
     } else if (snap.state === 2) {
@@ -769,6 +770,7 @@ async function pollOnce() {
         details: snap.title || "YouTube",
         state: "一時停止",
         largeImage: "art",
+        type: 2,
         buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
         force: true,
       });

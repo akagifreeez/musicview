@@ -133,6 +133,8 @@ export class DiscordPresence {
       if (a.largeImage) activity.assets.large_image = `mp:external/${a.largeImage}`;
       if (a.largeText) activity.assets.large_text = String(a.largeText).slice(0, 128);
     }
+    if (a.type != null) activity.type = a.type; // 2 = LISTENING(〜を再生中)
+    if (a.statusDisplayType != null) activity.status_display_type = a.statusDisplayType;
     if (Array.isArray(a.buttons) && a.buttons.length) {
       activity.buttons = a.buttons.slice(0, 2).map(b => ({
         label: String(b.label).slice(0, 32),
@@ -159,7 +161,11 @@ export class DiscordPresence {
 
   clear() {
     if (this.connected && this.sock) {
-      this.sock.write(encode(OP.FRAME, { cmd: "SET_ACTIVITY", args: { pid: process.pid } }));
+      this.sock.write(encode(OP.FRAME, {
+        cmd: "SET_ACTIVITY",
+        args: { pid: process.pid },
+        nonce: crypto.randomUUID(),
+      }));
     }
     this.lastActivity = null;
     this.lastKey = "";

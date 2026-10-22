@@ -102,6 +102,13 @@ export class DiscordPresence {
       if (!this.ping) this.ping = setInterval(() => {
         try { this.sock?.write(encode(OP.PING, Date.now())); } catch { /* 無視 */ }
       }, 11000);
+      return;
+    }
+    // コマンドへの応答(エラー診断用)
+    if (op === OP.FRAME && payload?.evt == null) {
+      if (payload?.code || payload?.message) {
+        this.log(`discord reply ERROR: code=${payload.code} message=${payload.message}`);
+      }
     }
   }
 

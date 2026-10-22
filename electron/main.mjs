@@ -762,9 +762,11 @@ async function pollOnce() {
         startAt: snap.state === 1 ? Date.now() - snap.time * 1000 : undefined,
         largeImage: "art",
         largeText: snap.title || "musicview",
+        smallImage: "icon", // アップロード時の名前がファイル名のままの場合の保険
+        smallText: "musicview",
       });
     } else if (snap.state === 2) {
-      discordClient.update({ details: snap.title || "YouTube", state: "一時停止", largeImage: "art", force: true });
+      discordClient.update({ details: snap.title || "YouTube", state: "一時停止", largeImage: "art", smallImage: "icon", force: true });
     } else {
       discordClient.clear();
     }
@@ -1411,16 +1413,17 @@ async function runProbeDiscord() {
   await sleep(5000);
   log("connected:", dc.connected);
   if (dc.connected) {
-    // アセット名 "art"(Developer Portal でアップロードした画像)があれば表示される
     dc.update({
       details: "musicview 接続テスト",
-      state: "art をアップロード済みなら画像が出る",
+      state: "large=art / small=icon のどちらかに画像が出る",
       startAt: Date.now() - 10000,
       largeImage: "art",
-      largeText: "musicview",
+      largeText: "art",
+      smallImage: "icon",
+      smallText: "icon",
       force: true,
     });
-    log("test presence sent — Discordのプロフィールを確認してください(10秒後に消えます)");
+    log("test presence sent — 10秒間表示されます");
     await sleep(10000);
     dc.clear();
     await sleep(1000);

@@ -762,11 +762,16 @@ async function pollOnce() {
         startAt: snap.state === 1 ? Date.now() - snap.time * 1000 : undefined,
         largeImage: "art",
         largeText: snap.title || "musicview",
-        smallImage: "icon", // アップロード時の名前がファイル名のままの場合の保険
-        smallText: "musicview",
+        buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
       });
     } else if (snap.state === 2) {
-      discordClient.update({ details: snap.title || "YouTube", state: "一時停止", largeImage: "art", smallImage: "icon", force: true });
+      discordClient.update({
+        details: snap.title || "YouTube",
+        state: "一時停止",
+        largeImage: "art",
+        buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
+        force: true,
+      });
     } else {
       discordClient.clear();
     }
@@ -1421,6 +1426,7 @@ async function runProbeDiscord() {
       largeText: "art",
       smallImage: "icon",
       smallText: "icon",
+      buttons: [{ label: "GitHub", url: "https://github.com/akagifreeez/musicview" }],
       force: true,
     });
     log("test presence sent — 10秒間表示されます");

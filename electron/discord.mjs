@@ -133,6 +133,12 @@ export class DiscordPresence {
       if (a.largeImage) activity.assets.large_image = `mp:external/${a.largeImage}`;
       if (a.largeText) activity.assets.large_text = String(a.largeText).slice(0, 128);
     }
+    if (Array.isArray(a.buttons) && a.buttons.length) {
+      activity.buttons = a.buttons.slice(0, 2).map(b => ({
+        label: String(b.label).slice(0, 32),
+        url: String(b.url),
+      }));
+    }
     this.sock.write(encode(OP.FRAME, {
       cmd: "SET_ACTIVITY",
       args: { pid: process.pid, activity },

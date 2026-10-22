@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src https://i.ytimg.com; style-src 'self'">
+  <title>musicview</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-mode="music">
+  <div id="ambient" aria-hidden="true"></div>
+  <header id="topbar">
+    <div class="tb-left">
+      <div class="brand">musicview</div>
+      <input id="search" type="text" placeholder="検索 または YouTube の URL / 動画ID を貼り付け" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="transport" aria-label="演奏操作">
+      <button id="prev" class="icon-btn" title="前の曲 (b)">
+        <svg viewBox="0 0 24 24"><path d="M7 6v12M18 6l-9 6 9 6z"/></svg>
+      </button>
+      <button id="pp" class="icon-btn play-main" title="再生 / 一時停止 (Space)">
+        <svg id="ic-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>
+        <svg id="ic-pause" viewBox="0 0 24 24" class="hidden"><path d="M8 5h3v14H8zM13 5h3v14h-3z"/></svg>
+      </button>
+      <button id="next" class="icon-btn" title="次の曲 (n)">
+        <svg viewBox="0 0 24 24"><path d="M17 6v12M6 6l9 6-9 6z"/></svg>
+      </button>
+    </div>
+    <div class="tb-right">
+      <select id="sleep" title="スリープタイマー">
+        <option value="0">スリープ: オフ</option>
+        <option value="15">15分</option>
+        <option value="30">30分</option>
+        <option value="45">45分</option>
+        <option value="60">60分</option>
+        <option value="90">90分</option>
+      </select>
+      <button id="import" class="btn secondary" title="Firefox / Floorp でログイン済みの YouTube セッションを取り込む(Google のログイン画面を使わない)">取り込み</button>
+      <button id="login" class="btn secondary" title="YouTube にログイン(ミックス・おすすめが自分向けになる)">ログイン</button>
+      <button id="mode" class="btn secondary" title="プレイヤー⇔サイト表示 (Ctrl+M)">サイト表示</button>
+    </div>
+  </header>
+
+  <main id="stage">
+    <aside id="side">
+      <div class="side-head">キュー</div>
+      <div id="tab-queue" class="list">
+        <div class="placeholder">再生中のミックス・プレイリストのキューがここに出る</div>
+      </div>
+      <div class="side-head">おすすめ<em id="recs-kind"></em></div>
+      <div id="tab-recs" class="list">
+        <div id="recs-body"><div class="placeholder">まだ取得していない</div></div>
+      </div>
+    </aside>
+
+    <section id="player">
+      <div class="art-wrap">
+        <img id="art" alt="">
+        <div id="idle" class="idle">
+          <div class="idle-mark">♪</div>
+          <p>検索するか URL を貼り付けて聴き始める<br>「この曲からミックス」で YouTube のラジオが続く</p>
+        </div>
+      </div>
+      <div class="now">
+        <h1 id="title">&nbsp;</h1>
+        <div id="author">&nbsp;</div>
+      </div>
+      <div class="progress">
+        <span id="t-cur" class="time">-0:00</span>
+        <input type="range" id="seek" min="0" max="1000" value="0" step="1">
+        <span id="t-dur" class="time">0:00</span>
+      </div>
+      <div class="nudge">
+        <button id="back30" class="icon-btn text" title="30秒戻る (Shift+←)">-30秒</button>
+        <button id="fwd30" class="icon-btn text" title="30秒進む (Shift+→)">+30秒</button>
+      </div>
+      <div class="aux-dock">
+        <div class="aux">
+          <div class="vol-wrap">
+            <svg viewBox="0 0 24 24" class="vol-icon"><path d="M4 9v6h4l5 4V5L8 9zM16 9c1 1 1 5 0 6"/></svg>
+            <input type="range" id="vol" min="0" max="100" value="100">
+          </div>
+          <select id="rate" title="再生速度">
+            <option value="0.5">0.5倍</option>
+            <option value="0.75">0.75倍</option>
+            <option value="1" selected>1倍</option>
+            <option value="1.25">1.25倍</option>
+            <option value="1.5">1.5倍</option>
+            <option value="2">2倍</option>
+          </select>
+          <select id="xfade" title="曲の終わりで次の曲と交叉させる(クロスフェード)">
+            <option value="0">クロスフェード: オフ</option>
+            <option value="3">3秒</option>
+            <option value="5">5秒</option>
+            <option value="8">8秒</option>
+            <option value="12">12秒</option>
+          </select>
+          <button id="loop" class="chip" title="この曲をループ">ループ</button>
+          <button id="shuffle" class="chip" title="キューを自分で並べ替えて次へ(ミックス継続は切れる)">シャッフル</button>
+          <button id="mix" class="chip accent" title="今の曲から YouTube ミックスを開始">この曲からミックス</button>
+          <span id="sleep-left" class="sleep-left"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

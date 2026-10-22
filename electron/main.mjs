@@ -74,6 +74,7 @@ let playKickAt = 0;
 let unstartedSince = 0;     // 広告詰まり等で unstarted が続いたときの自己回復用
 let recoveryKey = null;
 let recoveryTries = 0;
+let weMutedForRecovery = false; // ミュート再生で始動したあと解除するためのフラグ
 let lastQueueIds = null;    // プレイリストパネルから取ったキュー(getPlaylist が null のときの代役)
 let bootHasSession = false; // 起動時にセッション Cookie があるか(無いなら youtube を自動ロードしない)
 
@@ -430,6 +431,7 @@ let loopOn = false;     // 1曲ループ中はクロスフェードしない
 let lastRecsIds = [];   // おすすめ欄のID(キュー末端の補充に使う)
 let desiredVol = 100;   // アプリ側が管理する音量/速度(遷移しても YouTube の記憶値に戻されない)
 let desiredRate = 1;
+let xfadeCooldownUntil = 0; // キャンセル直後の再開を抑える(シーク連打などでのチャーン防止)
 
 function ensureXfadeView() {
   if (xfadeView && !xfadeView.webContents.isDestroyed()) {
@@ -451,9 +453,11 @@ function cancelXfade(reason) {
   if (xfade.ramp) clearInterval(xfade.ramp);
   execCmd("vol", desiredVol); // 主役側の音量を戻す
   try {
+    xfadeView?.webContents.setAudioMuted(true);
     xfadeView?.webContents.loadURL("about:blank");
   } catch { /* 無視 */ }
   xfade = null;
+  xfadeCooldownUntil = Date.now() + 3000; // 連打/連続シークでの再開チャーンを抑える
 }
 
 // 再生しながらの遷移(ミックス起動・選曲)はクロスフェードで滑らかに繋ぐ(Apple Music 風)。
@@ -494,19 +498,24 @@ async function tickXfade() {
   if (xfadeSec <= 0 || loopOn || !site || site.webContents.isDestroyed()) return;
   const s = lastSnap;
   if (!s || !s.ok) return;
-
-  // 主役が曲末に達した(フェードが間に合わなかった)場合は待機ビューに譲る
-  if (xfade && s.snap.state === 0) {
-    await finalizeXfade();
-    return;
-  }
-  if (s.snap.state !== 1 || s.snap.ad || s.snap.dur < 30) return;
-
   const remain = s.snap.dur - s.snap.time;
 
   if (!xfade) {
-    // フェード窓の20秒前からプリロードを始める(広告のスキップと再生開始を待つ余裕)
-    if (remain <= xfadeSec + 20) {
+    // 新規開始は主役が再生中のときだけ。
+    // 深シークでフェード窓を飛ばされて曲が終わった場合は、ハードカットで次曲へ進む
+    if (s.snap.state !== 1 || s.snap.ad || s.snap.dur < 30) {
+      if (s.snap.state === 0 && Date.now() > xfadeCooldownUntil) {
+        const nextId = queueNextId(s.snap);
+        if (nextId && nextId !== s.snap.videoId) {
+          console.log("musicview: hard-cut advance ->", nextId);
+          site.webContents.loadURL(watchUrl(nextId));
+        }
+      }
+      return;
+    }
+    // フェード窓の20秒前からプリロードを始める(広告のスキップと再生開始を待つ余裕)。
+    // 窓より深くまでシークされた場合(残り数秒)は間に合わないので、この曲はネイティブ遷移
+    if (remain <= xfadeSec + 20 && remain >= xfadeSec + 2 && Date.now() > xfadeCooldownUntil) {
       const nextId = queueNextId(s.snap);
       if (!nextId || nextId === s.snap.videoId) return;
       ensureXfadeView();
@@ -528,11 +537,13 @@ async function tickXfade() {
     return;
   }
 
-  // 広告中 / 未開始: 無音で再生を蹴り続け、詰まっていたら読み直して広告の判断をやり直す
+  // 広告中 / 未開始: プレイヤーミュート+再生を蹴り続け(ミュートなら自動再生が必ず通り、
+  // 無音)、詰まっていたら読み直して広告の判断をやり直す
   if (st.ad || st.state === -1 || st.state === 5) {
     if (Date.now() - xfade.lastKick > 800) {
       xfade.lastKick = Date.now();
       xfade.kicks++;
+      await execOn(xfadeView, `window.__mvCtl.cmd("mute")`);
       await execOn(xfadeView, `window.__mvCtl.cmd("vol", 0)`);
       await execOn(xfadeView, `window.__mvCtl.cmd("play")`);
       if (xfade.kicks % 12 === 0) {
@@ -540,6 +551,15 @@ async function tickXfade() {
         xfadeView.webContents.loadURL(xfade.url);
       }
     }
+    return;
+  }
+
+  // 主役が先に終わった(深シーク等): 待機ビューが鳴り始めたら即交代する。
+  // ここでは主役の状態に依存せず待機ビューを進める(止まったまま放置されないように)
+  if (s.snap.state === 0) xfade.endPending = true;
+  if (xfade.endPending && st.state === 1 && !st.ad && st.time > 0.5) {
+    console.log("musicview: xfade main ended early, promoting standby");
+    await finalizeXfade();
     return;
   }
 
@@ -618,6 +638,7 @@ function startFade(standbyState) {
   if (!xfade || xfade.phase === "fade") return;
   xfade.phase = "fade";
   xfadeView.webContents.setAudioMuted(false);
+  execOn(xfadeView, `window.__mvCtl.cmd("unMute")`);
   execOn(xfadeView, `window.__mvCtl.cmd("vol", 0)`);
   if (standbyState === 2) execOn(xfadeView, `window.__mvCtl.cmd("play")`);
   xfade.ramp = setInterval(() => { fadeStep().catch(() => {}); }, 150);
@@ -686,6 +707,14 @@ async function pollOnce() {
     await execCmd("rate", desiredRate);
   }
 
+  // 回復でミュート再生した場合の解除(コンテンツが鳴り始めた時点で)
+  if (weMutedForRecovery && snap.state === 1 && !snap.ad) {
+    weMutedForRecovery = false;
+    console.log("musicview: recovery unmute");
+    await execCmd("unmute");
+    await execCmd("vol", desiredVol);
+  }
+
   // 現在曲の曲名はプレイヤーから直に取れる(oEmbed を待たずにキュー表示が埋まる)
   if (snap.title && !titles.get(snap.videoId)?.title) {
     titles.set(snap.videoId, { title: snap.title, author: snap.author });
@@ -700,19 +729,28 @@ async function pollOnce() {
       playKickAt = Date.now();
       await execCmd("play");
     }
-    // 広告ストリームの読み込み詰まりなどで 10 秒以上立っても始まらないなら、
-    // ページURLの動画IDを読み直して広告を捨てさせる(動画あたり最大2回)。
-    // getVideoData の ID は広告クリエイティブを掴んでいることがあるため使わない
-    if (Date.now() - unstartedSince > 10000 && recoveryTries < 2) {
+    // 広告ストリームの読み込み詰まりなどで立たない場合の自己回復。
+    // ミュート再生なら自動再生が必ず通る(広告も無音でスキップされる)ことを利用し、
+    // 同曲再読込 → ミュート再生 → 次曲読込 → 同曲再読込 の順で試す(動画あたり4回)
+    if (Date.now() - unstartedSince > 8000 && recoveryTries < 4) {
       let target = null;
       try {
         target = new URL(site.webContents.getURL()).searchParams.get("v");
       } catch { /* 取れなければ諦める */ }
       if (target && /^[a-zA-Z0-9_-]{11}$/.test(target)) {
-        if (recoveryKey !== target) { recoveryKey = target; recoveryTries = 1; }
-        else recoveryTries++;
+        if (recoveryKey !== target) { recoveryKey = target; recoveryTries = 0; }
+        recoveryTries++;
         unstartedSince = Date.now();
-        await execCmd("load", target);
+        if (recoveryTries === 2) {
+          weMutedForRecovery = true;
+          console.log("musicview: recovery mute-play");
+          await execSite(`(function(){var p=document.getElementById("movie_player");if(!p)return;try{p.mute();p.playVideo();}catch(e){}})()`);
+        } else if (recoveryTries === 3) {
+          const nid = queueNextId(snap);
+          await execCmd("load", nid && nid !== target ? nid : target);
+        } else {
+          await execCmd("load", target);
+        }
       } else {
         unstartedSince = Date.now();
       }
@@ -1191,6 +1229,19 @@ async function runProbeXfade() {
           "videoId:", vid2, "time:", Math.round(r2?.snap?.time ?? -1), "vol:", Math.round(r2?.snap?.vol ?? -1));
         if (!xfade && vid2 !== beforeId && r2?.snap?.state === 1 && (r2?.snap?.time ?? 99) < 15) {
           log("manual transition OK: next track playing with volume carried over");
+          // 深シーク(フェード窓より深い)でも破綻しないことを確認する
+          const deep = (await pollOnce())?.snap;
+          if (deep && deep.dur > 30) {
+            log("deep seek test ->", Math.round(deep.dur - 1.5));
+            await execCmd("seek", deep.dur - 1.5);
+            for (let k = 0; k < 30; k++) {
+              await sleep(1500);
+              const r3 = await pollOnce();
+              log(`deep t+${Math.round((k + 1) * 1.5)}s`, "videoId:", r3?.snap?.videoId,
+                "state:", r3?.snap?.state, "time:", Math.round(r3?.snap?.time ?? -1),
+                "vol:", Math.round(r3?.snap?.vol ?? -1), "xfade:", xfade ? xfade.phase : "none");
+            }
+          }
           break;
         }
       }

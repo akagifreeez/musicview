@@ -628,6 +628,12 @@ async function tickXfade() {
     return;
   }
 
+  // 保留中に待機ビューが再生し出したら再ポーズする(ポーズ失敗時の暴走防止)
+  if (xfade.phase === "hold" && st.state === 1 && st.time > 1.5) {
+    await execOn(xfadeView, `window.__mvCtl.cmd("pause")`);
+    return;
+  }
+
   // 保留からのフェード開始(手動は準備完了直後=即応、自動はフェード窓)
   if (xfade.phase === "hold" && (xfade.manual || remain <= xfadeSec + 0.5)) {
     startFade(st.state);
@@ -637,6 +643,7 @@ async function tickXfade() {
 function startFade(standbyState) {
   if (!xfade || xfade.phase === "fade") return;
   xfade.phase = "fade";
+  xfade.startedAt = Date.now();
   xfadeView.webContents.setAudioMuted(false);
   execOn(xfadeView, `window.__mvCtl.cmd("unMute")`);
   execOn(xfadeView, `window.__mvCtl.cmd("vol", 0)`);
@@ -653,10 +660,17 @@ async function fadeStep() {
   const m = await snapOf(site);
   const st = await snapOf(xfadeView);
   const base = desiredVol;
-  // 進捗は「次の曲の再生位置」基準(0 → xfadeSec)
-  const p = st && st.time > 0 ? Math.min(1, st.time / xfadeSec) : 0;
-  const mainEnded = !m || m.state === 0 || (m.dur > 0 && m.time >= m.dur - 0.4);
-  if (IS_ANY_PROBE) console.log(`musicview: xfade-fade p=${Number(p).toFixed(2)} main(state=${m?.state},t=${Number(m?.time ?? 0).toFixed(1)}) st(state=${st?.state},t=${Number(st?.time ?? 0).toFixed(1)})`);
+  // 進捗の基準: 手動遷移=開始からの経過時間(今すぐ切り替えるのが目的)、
+  // 自動=主役の残り時間(xfadeSec 前から 0 → 曲末で 1)
+  let p;
+  if (xfade.manual) {
+    p = Math.min(1, (Date.now() - (xfade.startedAt ?? Date.now())) / (xfadeSec * 1000));
+  } else {
+    const remain = m ? m.dur - m.time : 0;
+    p = 1 - Math.min(1, Math.max(0, remain / xfadeSec));
+  }
+  const mainEnded = !xfade.manual && (!m || m.state === 0 || (m.dur > 0 && m.time >= m.dur - 0.4));
+  if (IS_ANY_PROBE) console.log(`musicview: xfade-fade p=${Number(p).toFixed(2)} remain=${Number(m ? m.dur - m.time : 0).toFixed(1)} main(state=${m?.state},t=${Number(m?.time ?? 0).toFixed(1)}) st(state=${st?.state},t=${Number(st?.time ?? 0).toFixed(1)})`);
   await execOn(site, `window.__mvCtl.cmd("vol", ${Math.round(base * (1 - p))})`);
   await execOn(xfadeView, `window.__mvCtl.cmd("vol", ${Math.round(base * p)})`);
   if (p >= 1 || mainEnded) await finalizeXfade();

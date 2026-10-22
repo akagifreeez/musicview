@@ -113,7 +113,10 @@ export class DiscordPresence {
   }
 
   sendActivity(a) {
-    if (!this.connected || !this.sock) return;
+    if (!this.connected || !this.sock) {
+      this.log("discord: not connected, skip send");
+      return;
+    }
     const activity = { instance: true };
     if (a.details) activity.details = String(a.details).slice(0, 128);
     if (a.state) activity.state = String(a.state).slice(0, 128);
@@ -122,6 +125,7 @@ export class DiscordPresence {
       cmd: "SET_ACTIVITY",
       args: { pid: process.pid, activity },
     }));
+    this.log(`discord: activity sent (${String(a.details ?? "").slice(0, 40)})`);
   }
 
   // 再生状態の反映。sameTrack=true のときは内容が変わっていなければ送らない

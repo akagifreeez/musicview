@@ -37,7 +37,8 @@ const IS_IMPORT_PROBE = argv.includes("--probe-import");
 const IS_DESKTOP_PROBE = argv.includes("--probe-desktop");
 const IS_XFADE_PROBE = argv.includes("--probe-xfade");
 const IS_AUDIO_PROBE = argv.includes("--probe-audio");
-const IS_ANY_PROBE = IS_PROBE || IS_IMPORT_PROBE || IS_DESKTOP_PROBE || IS_XFADE_PROBE || IS_AUDIO_PROBE;
+const IS_DISCORD_PROBE = argv.includes("--probe-discord");
+const IS_ANY_PROBE = IS_PROBE || IS_IMPORT_PROBE || IS_DESKTOP_PROBE || IS_XFADE_PROBE || IS_AUDIO_PROBE || IS_DISCORD_PROBE;
 // 広告ブロックが再生を詰まらせているかの切り分け用(musicview: adblock off で起動)
 const ADBLOCK_OFF = process.env.MUSICVIEW_NO_ADBLOCK === "1";
 const PARTITION = IS_PROBE ? "persist:musicview-probe" : "persist:musicview";
@@ -1394,6 +1395,32 @@ async function runProbeAudio() {
   app.exit(0);
 }
 
+// Discord接続の実走確認: 保存済みIDで接続し、テストプレゼンスを送る
+async function runProbeDiscord() {
+  const log = (...a) => console.log("probe-discord:", ...a);
+  await sleep(1000);
+  const id = (await fs.readFile(path.join(DATA_DIR, "discord.id"), "utf8")).trim();
+  log("client id:", id ? `${id.slice(0, 6)}…` : "(none)");
+  const dc = new DiscordPresence(id, (...a) => log("discord", ...a));
+  dc.start();
+  await sleep(5000);
+  log("connected:", dc.connected);
+  if (dc.connected) {
+    dc.update({
+      details: "musicview 接続テスト",
+      state: "この表示が出ればOK",
+      startAt: Date.now() - 10000,
+      force: true,
+    });
+    log("test presence sent — Discordのプロフィールを確認してください(8秒後に消えます)");
+    await sleep(8000);
+    dc.clear();
+    await sleep(1000);
+  }
+  dc.close();
+  app.exit(0);
+}
+
 // ── 起動 ──────────────────────────────────────
 app.whenReady().then(async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -1449,6 +1476,11 @@ app.whenReady().then(async () => {
   if (IS_DESKTOP_PROBE) runProbeDesktop().catch(e => { console.error("probe-desktop error:", e); app.exit(1); });
   if (argv.includes("--probe-xfade")) runProbeXfade().catch(e => { console.error("probe-xfade error:", e); app.exit(1); });
   if (IS_AUDIO_PROBE) runProbeAudio().catch(e => { console.error("probe-audio error:", e); app.exit(1); });
+  if (IS_DISCORD_PROBE) {
+    // 本体のシングルロックと無関係に接続テストだけを行う
+    app.whenReady().then(() => runProbeDiscord().catch(e => { console.error("probe-discord error:", e); app.exit(1); }));
+    return;
+  }
 });
 
 app.on("window-all-closed", () => app.quit());

@@ -371,10 +371,10 @@ els.tabRecs.addEventListener("click", (e) => {
 els.pp.addEventListener("click", () => {
   window.musicview.cmd(snap?.snap?.state === 1 ? "pause" : "play");
 });
-els.prev.addEventListener("click", () => window.musicview.cmd("prev"));
+els.prev.addEventListener("click", () => window.musicview.prev());
 els.next.addEventListener("click", () => {
   if (shuffleOn) window.musicview.shuffleNext();
-  else window.musicview.cmd("next");
+  else window.musicview.next();
 });
 els.back30.addEventListener("click", () => seekBy(-30));
 els.fwd30.addEventListener("click", () => seekBy(30));

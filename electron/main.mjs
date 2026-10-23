@@ -448,6 +448,7 @@ let lastRecsIds = [];   // おすすめ欄のID(キュー末端の補充に使�
 let desiredVol = 100;   // アプリ側が管理する音量/速度(遷移しても YouTube の記憶値に戻されない)
 let desiredRate = 1;
 let xfadeCooldownUntil = 0; // キャンセル直後の再開を抑える(シーク連打などでのチャーン防止)
+let playHistory = [];       // 「前の曲」用の再生履歴(あとから鳴った順・最大50)
 let vizPump = null;
 let eqGains = [0, 0, 0, 0, 0]; // 5バンドEQ(60Hz lowshelf が CLEAR BASS 相当)
 let vizOn = true;       // ビジュアライザー(解析値をUIへ送って描画)
@@ -520,6 +521,35 @@ function queueNextId(snap) {
     return lastRecsIds.find(id => id !== snap.videoId) ?? null;
   }
   return null;
+}
+
+// ── 前/次の曲 ──────────────────────────────────
+// プレイヤーAPIの previousVideo/nextVideo は実走で無反応だった(プレイリスト接続の
+// 有無にかかわらず信用できない)。そのため両方とも loadVideoById で飛ぶ:
+// 「前」は再生履歴、「次」は自前キュー(ミックス接続中はそのキュー、裸ページでは
+// 取得済みキュー/おすすめ)。shuffle の次曲と同じ確実な経路
+function goPrev() {
+  const cur = lastSnap?.snap?.videoId;
+  while (playHistory.length) {
+    const id = playHistory.pop();
+    if (id && id !== cur) {
+      execCmd("load", id);
+      return id;
+    }
+  }
+  execCmd("prev"); // 履歴が無いときの一抑え(効かなければ現状維持)
+  return null;
+}
+
+function goNext() {
+  const snap = lastSnap?.snap;
+  const nid = snap ? queueNextId(snap) : null;
+  if (nid) {
+    execCmd("load", nid);
+    return nid;
+  }
+  execCmd("next"); // 自前キューでも次が取れないときの最後の一抑え
+  return "player";
 }
 
 async function tickXfade() {
@@ -754,6 +784,10 @@ async function pollOnce() {
   if (!snap || !snap.videoId) return { ok: false, mode, blocked: blockedCount };
 
   if (snap.videoId !== lastVideoId) {
+    if (lastVideoId && lastVideoId !== snap.videoId) {
+      playHistory.push(lastVideoId);
+      if (playHistory.length > 50) playHistory.shift();
+    }
     lastVideoId = snap.videoId;
     scheduleRecsExtract();
     // 遷移のたびにアプリ側の音量/速度を引き継ぐ(YouTube の記憶値に戻されるのを防ぐ。
@@ -1088,6 +1122,9 @@ function registerIpc() {
     if (next) execCmd("load", next);
     return next;
   });
+
+  ipcMain.handle("mv:prev", () => goPrev());
+  ipcMain.handle("mv:next", () => goNext());
 }
 
 // ── ウィンドウ ────────────────────────────────
@@ -1205,6 +1242,21 @@ async function runProbe() {
     );
     log("yt-prune stats:", pr);
   } catch (e) { log("yt-prune stats: err", e.message); }
+
+  // 前/次ボタン。次で進んで履歴が積まれ、前で戻る往復を確認する
+  // (プレイヤーAPIの nextVideo/previousVideo は実走で無反応のため loadVideoById 経路)
+  try {
+    const s0 = await pollOnce();
+    const r1 = await win.webContents.executeJavaScript("window.musicview.next()");
+    await sleep(3000);
+    const s1 = await pollOnce();
+    const r2 = await win.webContents.executeJavaScript("window.musicview.prev()");
+    await sleep(3000);
+    const s2 = await pollOnce();
+    log("prev-next:", s0?.snap?.videoId, "-> next", JSON.stringify(r1), "->", s1?.snap?.videoId,
+      "-> prev", JSON.stringify(r2), "->", s2?.snap?.videoId,
+      (s1?.snap?.videoId !== s0?.snap?.videoId && s2?.snap?.videoId === s0?.snap?.videoId) ? "ROUNDTRIP-OK" : "CHECK");
+  } catch (e) { log("prev-next err:", e.message); }
 
   // fetch ラッパが詰まらないこと(サイト画面で動画クリック時に読み込みが止まる回帰)。
   // 実エンドポイントへの POST は YouTube 側の判断で 400 系になるが、約束が解決して
@@ -1562,8 +1614,8 @@ app.whenReady().then(async () => {
       const s = await pollOnce();
       await execCmd(s?.snap?.state === 1 ? "pause" : "play");
     });
-    globalShortcut.register("MediaNextTrack", () => execCmd("next"));
-    globalShortcut.register("MediaPreviousTrack", () => execCmd("prev"));
+    globalShortcut.register("MediaNextTrack", () => goNext());
+    globalShortcut.register("MediaPreviousTrack", () => goPrev());
   }
 
   if (!IS_ANY_PROBE) setInterval(() => { saveSession(); saveTitles(); }, 5000);

@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld("musicview", {
   setMode: (m) => ipcRenderer.invoke("mv:set-mode", m),
   getMode: () => ipcRenderer.invoke("mv:get-mode"),
   shuffleNext: () => ipcRenderer.invoke("mv:shuffle-next"),
+  prev: () => ipcRenderer.invoke("mv:prev"),
+  next: () => ipcRenderer.invoke("mv:next"),
   setXfade: (sec) => ipcRenderer.invoke("mv:set-xfade", sec),
   setLoop: (on) => ipcRenderer.invoke("mv:set-loop", on),
   setEq: (gains) => ipcRenderer.invoke("mv:set-eq", gains),

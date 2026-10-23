@@ -92,6 +92,7 @@ export const SITE_BOOTSTRAP = `
   // 2回呼べず、再注入でクロージャを作り直すと例外でEQ/解析が死ぬため
   var audio = window.__mvAudio || null;
   var audioEl = null;
+  var audioFails = 0; // 連続失敗。デバイスが死んでいるのに無限に挑戦しないためのカウンタ
   // グラフの完全解体。動画要素が遷移で破壊される局面(ハード遷移/プレイヤー再構築)と
   // 解析の読み取りが重なるとレンダラーごと落ちる(音声スレッドの競合→SIGSEGV)ため、
   // 遷移の beforeunload と「要素がDOMから外れた」検知の両面で先に解体する
@@ -109,16 +110,47 @@ export const SITE_BOOTSTRAP = `
     window.__mvAudio = null;
   }
   window.addEventListener("beforeunload", function () { hardTeardown(); });
+  // ページが安定した合図(YouTube自身の遷移完了イベント)を待つゲート。
+  // 起動途中のページにグラフを張ると要素upgradeが壊れて骨格ページになるため
+  window.__mvPageReady = false;
+  try {
+    window.addEventListener("yt-navigate-finish", function () { window.__mvPageReady = true; });
+  } catch (e) {}
+  setTimeout(function () { window.__mvPageReady = true; }, 12000); // 発火しないページ向けの代替
   function ensureAudio() {
+    if (window.__mvAudioDisabled) return false;
+    var v = null;
+    try {
+      v = document.querySelector("video.html5-main-video");
+    } catch (e) {}
     try {
       if (audio && (!audioEl || !audioEl.isConnected)) hardTeardown(); // 要素交代(遷移)を検知
     } catch (e) {}
     if (audio) return true;
+    if (audioFails >= 3) {
+      // 音声デバイス/WebAudioレンダラーが壊れている。グラフを作ると要素の音を
+      // 壊れた経路に奪われる(無音化)ので、以降は素通しで鳴らして諦める
+      window.__mvAudioDisabled = true;
+      return false;
+    }
+    // ポリマー起動中(dom-ready直後)にグラフを作ると YouTube の初期化が壊れ、
+    // ホームのフィードが丸ごと描かなくなる。ページが安定し、実際に鳴り始めて
+    // から接続する
     try {
-      var v = document.querySelector("video.html5-main-video");
+      if (!window.__mvPageReady) return false;
+      if (!v || v.paused || !(v.currentTime > 0.5)) return false;
+    } catch (e) {
+      return false;
+    }
+    try {
       var AC = window.AudioContext || window.webkitAudioContext;
       if (!v || !AC) return false;
       var ctx = new AC();
+      if (ctx.state === "closed" || ctx.state === "interrupted") {
+        audioFails++;
+        try { ctx.close(); } catch (e) {}
+        return false;
+      }
       var src = ctx.createMediaElementSource(v);
       var defs = [[60, "lowshelf"], [250, "peaking"], [1000, "peaking"], [3500, "peaking"], [10000, "highshelf"]];
       var bands = [];
@@ -148,16 +180,29 @@ export const SITE_BOOTSTRAP = `
         for (var k = 0; k < bands.length && k < d.length; k++) bands[k].gain.value = Number(d[k]) || 0;
       }
       if (ctx.state === "suspended") { try { ctx.resume(); } catch (e) {} }
+      audioFails = 0;
       return true;
-    } catch (e) { return false; }
+    } catch (e) {
+      audioFails++;
+      audio = null;
+      audioEl = null;
+      window.__mvAudio = null;
+      return false;
+    }
   }
   function ctlEq(gains) {
-    if (!ensureAudio() || !audio) return "no-audio";
     if (!Array.isArray(gains)) return "bad-args";
+    // 希望値はグラフが無い間も覚えておく(再生開始でグラフを作った時に自動適用される)
     window.__mvEqDesired = gains.slice();
-    for (var i = 0; i < audio.bands.length; i++) {
-      var g = Number(gains[i]) || 0;
-      audio.bands[i].gain.value = g;
+    if (!ensureAudio() || !audio) return "no-audio";
+    try {
+      for (var i = 0; i < audio.bands.length; i++) {
+        var g = Number(gains[i]) || 0;
+        audio.bands[i].gain.value = g;
+      }
+    } catch (e) {
+      if (++audioFails >= 3) { hardTeardown(); window.__mvAudioDisabled = true; }
+      return "error";
     }
     return "ok";
   }
@@ -167,7 +212,15 @@ export const SITE_BOOTSTRAP = `
     } catch (e) {}
     if (!ensureAudio() || !audio) return null;
     n = Math.min(64, Math.max(4, Number(n) || 28));
-    audio.an.getByteFrequencyData(audio.buf);
+    try {
+      audio.an.getByteFrequencyData(audio.buf);
+    } catch (e) {
+      // AudioContext が音声デバイス/レンダラーのエラー状態のとき毎周期ここに来る。
+      // 3回続いたら解体して諦める(エラーフラッドと要素音の掠め取りを止める)
+      if (++audioFails >= 3) { hardTeardown(); window.__mvAudioDisabled = true; }
+      return null;
+    }
+    audioFails = 0;
     var out = [], per = Math.floor(audio.buf.length / n);
     for (var i = 0; i < n; i++) {
       var sum = 0;

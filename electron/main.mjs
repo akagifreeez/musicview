@@ -40,7 +40,9 @@ const IS_DESKTOP_PROBE = argv.includes("--probe-desktop");
 const IS_XFADE_PROBE = argv.includes("--probe-xfade");
 const IS_AUDIO_PROBE = argv.includes("--probe-audio");
 const IS_DISCORD_PROBE = argv.includes("--probe-discord");
-const IS_ANY_PROBE = IS_PROBE || IS_IMPORT_PROBE || IS_DESKTOP_PROBE || IS_XFADE_PROBE || IS_AUDIO_PROBE || IS_DISCORD_PROBE;
+// サイト画面でのホーム→動画クリック(SPA遷移)の実走観測。「読み込みが止まる」の捕獲用
+const IS_SPA_PROBE = argv.includes("--probe-spa");
+const IS_ANY_PROBE = IS_PROBE || IS_IMPORT_PROBE || IS_DESKTOP_PROBE || IS_XFADE_PROBE || IS_AUDIO_PROBE || IS_DISCORD_PROBE || IS_SPA_PROBE;
 // 広告ブロックが再生を詰まらせているかの切り分け用(musicview: adblock off で起動)
 const ADBLOCK_OFF = process.env.MUSICVIEW_NO_ADBLOCK === "1";
 const PARTITION = IS_PROBE ? "persist:musicview-probe" : "persist:musicview";
@@ -201,7 +203,7 @@ function makeYouTubeView() {
       // 走る必要があるため、このビュー群だけ sandbox/contextIsolation を切る
       sandbox: false,
       contextIsolation: false,
-      preload: path.join(ROOT, "electron", "yt-preload.cjs"),
+      preload: process.env.MUSICVIEW_NO_PRELOAD === "1" ? undefined : path.join(ROOT, "electron", "yt-preload.cjs"),
       backgroundThrottling: false, // 非表示でも広告スキップ等のタイマを止めない
       partition: PARTITION,
     },
@@ -258,11 +260,16 @@ function ensureSite() {
 
 async function injectInto(wc) {
   if (!wc || wc.isDestroyed()) return;
+  // 切り分け用: 注入(可視性スプーフ/操作ブリッジ/CSS/EQ反映)を部位ごと外せる
+  if (process.env.MUSICVIEW_NO_INJECT === "1") return;
   try {
-    await wc.executeJavaScript(VISIBILITY_PATCH + "\n" + SITE_BOOTSTRAP);
-    await wc.insertCSS(AD_HIDE_CSS);
+    const parts = [];
+    if (process.env.MUSICVIEW_NO_VIS !== "1") parts.push(VISIBILITY_PATCH);
+    if (process.env.MUSICVIEW_NO_BOOT !== "1") parts.push(SITE_BOOTSTRAP);
+    if (parts.length) await wc.executeJavaScript(parts.join("\n"));
+    if (process.env.MUSICVIEW_NO_CSS !== "1") await wc.insertCSS(AD_HIDE_CSS);
     // EQ/ビジュアライザーを使う設定のときはオーディオグラフを接続してゲインを反映
-    if (!isFlat(eqGains) || vizOn) {
+    if (process.env.MUSICVIEW_NO_EQ !== "1" && (!isFlat(eqGains) || vizOn)) {
       await wc.executeJavaScript(`window.__mvCtl && window.__mvCtl.cmd("eq", ${JSON.stringify(eqGains)})`);
     }
   } catch { /* 遷移直後のレースは無視(次の poll で再注入される) */
@@ -277,7 +284,7 @@ function ensureBrowse() {
       // makeYouTubeView と同じ yt-preload 配線(検索結果側で鳴る埋め込みにも備える)
       sandbox: false,
       contextIsolation: false,
-      preload: path.join(ROOT, "electron", "yt-preload.cjs"),
+      preload: process.env.MUSICVIEW_NO_PRELOAD === "1" ? undefined : path.join(ROOT, "electron", "yt-preload.cjs"),
       backgroundThrottling: false,
       partition: PARTITION,
     },
@@ -1460,6 +1467,142 @@ async function runProbe() {
   app.exit(0);
 }
 
+// サイト画面でのホーム→動画クリック(SPA遷移)を実走観察する。
+// 「クリックしたら読み込みが止まる」を捕獲するための観測装置:
+//   - シャドウDOMを潜って本物の動画要素をクリック
+//   - 遷移/再生状態/スピナー/広告/解析統計を3秒間隔で追跡
+//   - executeJavaScript が5秒返らなかったら「レンダラー固まり」として記録
+//   - コンソールエラー・レンダラー死亡・遷移イベントをすべて残す
+async function runProbeSpa() {
+  const log = (...a) => console.log("spa:", ...a);
+  await sleep(2000);
+  ensureSite();
+  setMode("site");
+  const wc = site.webContents;
+  const onConsole = (_e, level, message, line, sourceId) => {
+    if (level >= 3) log("console-err:", String(message).slice(0, 200), "@", String(sourceId || "").split("/").pop() + ":" + line);
+  };
+  wc.on("console-message", onConsole);
+  wc.on("render-process-gone", (_e, d) => log("RENDERER-GONE:", JSON.stringify(d)));
+  wc.on("did-navigate", (_e, u) => log("nav:", String(u).slice(0, 90)));
+  wc.on("did-navigate-in-page", (_e, u, isMain) => { if (isMain) log("in-page-nav:", String(u).slice(0, 90)); });
+
+  wc.loadURL(sessionData?.url ?? "https://www.youtube.com/");
+  await sleep(9000);
+  // 前回曲からの復元を待ってから、ロゴ経由のSPA遷移でホームへ行く(ユーザーの実フロー)
+  for (let i = 0; i < 10; i++) {
+    const s = await wc.executeJavaScript(`JSON.stringify((function () {
+      var s = window.__mvCtl ? (window.__mvCtl.snap() || {}) : {};
+      return { state: s.state ?? null, href: location.href.slice(0, 60) };
+    })())`).catch(() => "{}");
+    try { const p = JSON.parse(s); if (p.state === 1) { log("restored:", p.href, "playing"); break; } } catch { }
+    await sleep(2000);
+  }
+  const logoClicked = await wc.executeJavaScript(`(function () {
+    var el = document.querySelector("a#logo") || document.querySelector("ytd-topbar-logo-renderer a") || document.querySelector("ytd-topbar-logo-renderer");
+    if (!el) return "no-logo";
+    el.click();
+    return "logo";
+  })()`);
+  log("logo-click:", JSON.stringify(logoClicked));
+  await sleep(6000);
+
+  const census = await wc.executeJavaScript(`(function () {
+    function deepAll(sel) {
+      var out = [];
+      function walk(root) {
+        try { root.querySelectorAll(sel).forEach(function (e) { out.push(e); }); } catch (e) {}
+        try {
+          var all = root.querySelectorAll("*");
+          for (var i = 0; i < all.length; i++) { if (all[i].shadowRoot) walk(all[i].shadowRoot); }
+        } catch (e) {}
+      }
+      walk(document);
+      return out;
+    }
+    var cands = ["ytd-rich-item-renderer", "yt-lockup-view-model", "ytd-video-renderer", "a#video-title-link", "ytd-video-preview", "ytd-media-renderer"];
+    var found = {};
+    cands.forEach(function (c) { found[c] = deepAll(c).length; });
+    found.readyState = document.readyState;
+    found.title = (document.title || "").slice(0, 40);
+    // 実際に何があるか: ytd-app 配下のタグ名上位と、クリック可能そうな要素の感触
+    var tags = {};
+    try {
+      document.querySelectorAll("ytd-app *").forEach(function (e) {
+        var t = e.tagName.toLowerCase();
+        if (t.indexOf("ytd-") === 0 || t.indexOf("yt-") === 0) tags[t] = (tags[t] || 0) + 1;
+      });
+    } catch (e) {}
+    found.topTags = Object.entries(tags).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 14);
+    found.appChildren = (function () {
+      var a = document.querySelector("ytd-app");
+      return a ? [...a.children].map(function (e) { return e.tagName.toLowerCase(); }).join(",") : "no-ytd-app";
+    })();
+    found.permBar = (function () {
+      var b = document.querySelector("ytd-permission-role-bottom-bar-renderer, ytd-consent-bump-v2-lightbox");
+      return b ? (b.textContent || "").replace(/\s+/g, " ").slice(0, 120) : "none";
+    })();
+    found.ytInitialData = typeof window.ytInitialData === "object" && window.ytInitialData ? JSON.stringify(window.ytInitialData).length : String(typeof window.ytInitialData);
+    found.browse = !!document.querySelector("ytd-browse");
+    found.bodyText = (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 150);
+    return JSON.stringify(found);
+  })()`);
+  try {
+    await probeShot(wc, path.join(DATA_DIR, "probe", "spa-home.png"));
+  } catch (e) { log("shot err:", e.message); }
+  log("home census:", census);
+
+  const clicked = await wc.executeJavaScript(`(function () {
+    // ポリマーUIが死んでいる場合にユーザーが実際に押すのは素の<a>。それを再現する
+    var anchors = [...document.querySelectorAll("a[href*='/watch']")];
+    var pick = anchors.find(function (a) {
+      var v = new URLSearchParams(a.href || "").get("v");
+      return v && v !== (window.__mvCtl ? (window.__mvCtl.snap() || {}).videoId : null);
+    });
+    if (!pick) return "no-watch-anchor(x" + anchors.length + ")";
+    var r = pick.getBoundingClientRect();
+    pick.click();
+    return "anchor:" + (pick.href || "").slice(0, 60) + " @" + Math.round(r.x) + "," + Math.round(r.y);
+  })()`);
+  log("clicked:", JSON.stringify(clicked));
+
+  let done = false;
+  const navigated = typeof clicked === "string" && clicked.startsWith("anchor:");
+  if (!navigated) log("NOTE: クリック対象が無く遷移していない(骨格ページの可能性)");
+  for (let i = 1; i <= 12 && !done; i++) {
+    await sleep(3000);
+    const st = await Promise.race([
+      wc.executeJavaScript(`JSON.stringify((function () {
+        var s = window.__mvCtl ? (window.__mvCtl.snap() || {}) : {};
+        var v = document.querySelector("video.html5-main-video");
+        var sp = document.querySelector(".ytp-spinner");
+        return {
+          href: location.href.slice(0, 100),
+          ready: document.readyState,
+          vid: s.videoId || null,
+          state: s.state ?? null,
+          ad: !!document.querySelector(".ad-showing"),
+          spinner: sp ? !sp.hasAttribute("hidden") : false,
+          vidT: v ? Math.round(v.currentTime * 10) / 10 : null,
+          vidPaused: v ? v.paused : null,
+          prune: window.__mvPrune ? JSON.stringify(window.__mvPrune) : null
+        };
+      })())`).catch(e => "exec-err:" + String(e && e.message).slice(0, 80)),
+      new Promise(r => setTimeout(() => r("EXEC-STUCK-5s(レンダラー無応答)"), 5000)),
+    ]);
+    log(`t=${i * 3}s:`, st);
+    if (navigated && typeof st === "string" && st.indexOf("{") === 0) {
+      try {
+        const p = JSON.parse(st);
+        if (p.vid && p.state === 1 && !p.ad && p.vidT > 1) { log("RESULT: PLAYING-OK(クリック後の遷移と再生を確認)"); done = true; }
+      } catch { /* 次へ */ }
+    }
+  }
+  if (!done && navigated) log("RESULT: NOT-PLAYING(止まり再現の疑い) — 上記の時系列を解析のこと");
+  wc.removeListener("console-message", onConsole);
+  app.exit(0);
+}
+
 // Cookie 取り込みの実走確認: 実パーティションへ取り込み → ホームを開いてログイン面を確認。
 // importCookiesSafely が既存クッキーを掃除してから入れるため、何度実行しても冪等
 async function runProbeImport() {
@@ -1719,6 +1862,10 @@ app.whenReady().then(async () => {
     installAdblock(session.fromPartition(PARTITION));
     loadFilters().catch(() => {}); // 背景ロード(初回は DL に時間がかかる)
   }
+  // 切り分け用: yt-preload(データ層の広告剥ぎ)を外して起動する
+  if (process.env.MUSICVIEW_NO_PRELOAD === "1") {
+    console.log("musicview: yt-preload OFF (MUSICVIEW_NO_PRELOAD=1)");
+  }
   createWindow();
   if (sessionData || bootHasSession) ensureSite();
   applyMode();
@@ -1736,6 +1883,7 @@ app.whenReady().then(async () => {
   if (!IS_ANY_PROBE) setInterval(() => { saveSession(); saveTitles(); }, 5000);
 
   if (IS_PROBE) runProbe().catch(e => { console.error("probe error:", e); app.exit(1); });
+  if (IS_SPA_PROBE) runProbeSpa().catch(e => { console.error("spa error:", e); app.exit(1); });
   if (IS_IMPORT_PROBE) runProbeImport().catch(e => { console.error("probe-import error:", e); app.exit(1); });
   if (IS_DESKTOP_PROBE) runProbeDesktop().catch(e => { console.error("probe-desktop error:", e); app.exit(1); });
   if (argv.includes("--probe-xfade")) runProbeXfade().catch(e => { console.error("probe-xfade error:", e); app.exit(1); });

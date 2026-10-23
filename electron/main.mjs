@@ -1114,6 +1114,8 @@ function registerIpc() {
     if (typeof name !== "string") return null;
     // ユーザーの操作(次曲/シーク/停止など)が来たらクロスフェードは中断して音量を戻す
     if (xfade && !["vol", "rate"].includes(name)) cancelXfade(`user cmd: ${name}`);
+    if (name === "pause") userPauseAt = Date.now();
+    if (name === "sleep-pause") sleepPauseAt = Date.now();
     if (name === "vol") desiredVol = Math.min(100, Math.max(0, Number(arg) || 0));
     if (name === "rate") desiredRate = Math.min(2, Math.max(0.25, Number(arg) || 1));
     return execCmd(name, arg);

@@ -293,7 +293,7 @@ function render() {
       sleepEnd = 0;
       els.sleep.value = "0";
       els.sleepLeft.textContent = "";
-      window.musicview.cmd("pause");
+      window.musicview.cmd("sleep-pause");
     }
   }
 

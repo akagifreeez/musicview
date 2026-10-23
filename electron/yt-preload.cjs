@@ -11,9 +11,14 @@
 // 回帰テストできる(実機でしか起きないバグをここで潰す)
 const { prunePlayerResponse } = require("../lib/ytprune.cjs");
 
-function installHooks(env) {
+function installHooks(env, opts) {
   const win = env.window;
   const XHR = env.XMLHttpRequest;
+  // pruneはデフォルトOFF。/player応答の改変がYouTubeのSABR系ストリーミングと
+  // 相性が悪く、データURLが403で拒否されて「クリック後に読み込みが止まる」原因に
+  // なったため(2026-10-24実走)。MUSICVIEW_PRUNE=1 で実験的に有効化できる。
+  // 広告は従来どおり skipTick(スキップ/シーク)+CSS隠し+ネットワーク遮断で処理する
+  const prune = !!(opts && opts.prune);
   const stats = { inline: 0, parse: 0, err: 0 };
   try { win.__mvPrune = stats; } catch (e) {}
 
@@ -27,7 +32,7 @@ function installHooks(env) {
   try { delete win.clearImmediate; } catch (e) {}
 
   // 1) HTML 埋め込みのプレイヤーレスポンス(ページスクリプトの代入より先に罠を張る)
-  try {
+  if (prune) try {
     let yipr;
     Object.defineProperty(win, "ytInitialPlayerResponse", {
       configurable: true,
@@ -41,10 +46,9 @@ function installHooks(env) {
     });
   } catch (e) { stats.err++; }
 
-  // 2) JSON.parse 経路。応答オブジェクトには触れず、パース結果のルートだけを見る。
-  // fetch/XHR どちらで取得しても最終的に JSON.parse を通るため、応答の差し替えより
-  // 透過的(失敗モードが存在しない)
-  try {
+  // 2) JSON.parse 経路(prune有効時のみ)。応答オブジェクトには触れず、パース結果の
+  // ルートだけを見る
+  if (prune) try {
     const op = win.JSON.parse;
     if (typeof op === "function") {
       const hooked = function (text, reviver) {
@@ -75,6 +79,6 @@ if (typeof module !== "undefined" && module.exports && !(process.versions && pro
   // Node(テスト): 実配線は行わず、差し込み口だけ公開する
   module.exports = { installHooks: installHooks };
 } else {
-  // Electron preload: 実環境へ差し込む
-  installHooks({ window: window, XMLHttpRequest: XMLHttpRequest });
+  // Electron preload: 実環境へ差し込む(pruneはMUSICVIEW_PRUNE=1でのみ有効)
+  installHooks({ window: window, XMLHttpRequest: XMLHttpRequest }, { prune: process.env.MUSICVIEW_PRUNE === "1" });
 }

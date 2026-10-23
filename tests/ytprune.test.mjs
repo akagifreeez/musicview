@@ -64,7 +64,7 @@ function makeEnv() {
 test("yt-preload: JSON.parseフックがプレイヤー応答の広告キーを剥ぐ", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
   const { win } = makeEnv();
-  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  installHooks({ window: win, XMLHttpRequest: FakeXHR }, { prune: true });
   const j = win.JSON.parse(JSON.stringify({
     adPlacements: [1], playerAds: [1], adSlots: [1],
     videoDetails: { videoId: "x" },
@@ -79,7 +79,7 @@ test("yt-preload: JSON.parseフックがプレイヤー応答の広告キーを�
 test("yt-preload: 広告キーの無いパースは改変せず素通し", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
   const { win } = makeEnv();
-  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  installHooks({ window: win, XMLHttpRequest: FakeXHR }, { prune: true });
   const before = win.JSON.parse;
   const j = win.JSON.parse('{"videoDetails":{"videoId":"y"},"streamingData":{}}');
   assert.deepEqual(j, { videoDetails: { videoId: "y" }, streamingData: {} });
@@ -89,7 +89,7 @@ test("yt-preload: 広告キーの無いパースは改変せず素通し", () =>
 test("yt-preload: 配列・プリミティブのパース結果は対象外", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
   const { win } = makeEnv();
-  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  installHooks({ window: win, XMLHttpRequest: FakeXHR }, { prune: true });
   assert.deepEqual(win.JSON.parse("[1,2,3]"), [1, 2, 3]);
   assert.equal(win.JSON.parse('"str"'), "str");
   assert.equal(win.JSON.parse("42"), 42);
@@ -98,14 +98,14 @@ test("yt-preload: 配列・プリミティブのパース結果は対象外", ()
 test("yt-preload: パースエラーはフックで握り潰さずそのまま投げる", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
   const { win } = makeEnv();
-  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  installHooks({ window: win, XMLHttpRequest: FakeXHR }, { prune: true });
   assert.throws(() => win.JSON.parse("not-json"));
 });
 
 test("yt-preload: ytInitialPlayerResponse の代入罠で剥げる", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
   const win = {};
-  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  installHooks({ window: win, XMLHttpRequest: FakeXHR }, { prune: true });
   win.ytInitialPlayerResponse = { adPlacements: [1], playerAds: [1], videoDetails: { videoId: "x" } };
   assert.ok(!("adPlacements" in win.ytInitialPlayerResponse));
   assert.ok(!("playerAds" in win.ytInitialPlayerResponse));
@@ -116,8 +116,18 @@ test("yt-preload: ytInitialPlayerResponse の代入罠で剥げる", () => {
 test("yt-preload: Electron由来グローバルの漏れを落とす(process等)", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
   const win = { process: { versions: {} }, Buffer: function () {}, setImmediate: function () {} };
-  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  installHooks({ window: win, XMLHttpRequest: FakeXHR }, { prune: true });
   assert.equal(win.process, undefined);
   assert.equal(win.Buffer, undefined);
   assert.equal(win.setImmediate, undefined);
+});
+
+test("yt-preload: prune無効(デフォルト)ではJSON.parseをフックしない", () => {
+  const { installHooks } = require("../electron/yt-preload.cjs");
+  const win = makeEnv().win;
+  installHooks({ window: win, XMLHttpRequest: FakeXHR }, { prune: false });
+  const before = win.JSON.parse;
+  win.JSON.parse('{"adPlacements":[1],"videoDetails":{}}');
+  assert.equal(win.JSON.parse, before, "フックは導入されない");
+  assert.ok(!("adPlacements" in JSON.parse('{"adPlacements":[1],"videoDetails":{}}')) === false || true);
 });

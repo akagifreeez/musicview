@@ -1995,6 +1995,16 @@ app.whenReady().then(async () => {
     installAdblock(session.fromPartition(PARTITION));
     loadFilters().catch(() => {}); // 背景ロード(初回は DL に時間がかかる)
   }
+  // Electron UAのままだとYouTubeのボット判定が動画データURLを403で拒否することが
+  // あるため、実Chrome相当のUAに寄せる(Chromiumのバージョンは実値)
+  try {
+    const ua = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
+    session.fromPartition(PARTITION).setUserAgent(ua);
+    console.log("musicview: ua override ->", ua.slice(0, 70));
+  } catch (e) { console.error("musicview: ua override failed", e.message); }
+  if (process.env.MUSICVIEW_PRUNE === "1") {
+    console.log("musicview: json-prune ENABLED (MUSICVIEW_PRUNE=1・403ストール再現の実験用)");
+  }
   // 切り分け用: yt-preload(データ層の広告剥ぎ)を外して起動する
   if (process.env.MUSICVIEW_NO_PRELOAD === "1") {
     console.log("musicview: yt-preload OFF (MUSICVIEW_NO_PRELOAD=1)");

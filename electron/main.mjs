@@ -1,7 +1,7 @@
 // musicview — YouTube 動画を音楽として聴くことに特化したプレイヤー
 // 実サイト(youtube.com)を WebContentsView で包み、音楽向けの操作面を上に重ねる。
 // 広告は webRequest(EasyList エンジン)+ プレイヤー内スキップ + CSS 隠しの 3 段構え
-import { app, BrowserWindow, WebContentsView, ipcMain, globalShortcut, session, contentTracing } from "electron";
+import { app, BrowserWindow, WebContentsView, ipcMain, globalShortcut, session, contentTracing, net } from "electron";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +17,16 @@ import { importYoutubeCookies } from "./browser-import.mjs";
 import { DiscordPresence } from "./discord.mjs";
 
 const require = createRequire(import.meta.url);
+
+// メインプロセスの未処理例外は Electron がモーダルダイアログを出して停止してしまう。
+// undici の assert(this.paused)(中断応答の後処理で飛ぶ既知バグ)等は継続できる類なので
+// 記録して生存する。致命傷になった場合はログで追える
+process.on("uncaughtException", (e) => {
+  console.error("musicview: uncaught exception (続行):", String((e && (e.stack || e.message)) || e).slice(0, 400));
+});
+process.on("unhandledRejection", (e) => {
+  console.error("musicview: unhandled rejection (続行):", String((e && (e.reason && (e.reason.stack || e.reason.message))) || e).slice(0, 400));
+});
 const { AdblockEngine } = require("./adblock.cjs");
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -128,7 +138,7 @@ async function downloadFilters() {
   let combined = "";
   for (const url of FILTER_SOURCES) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+      const res = await net.fetch(url, { signal: AbortSignal.timeout(30000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       combined += await res.text() + "\n";
     } catch (e) {
@@ -355,7 +365,7 @@ function ensureBrowse() {
 async function fetchTitle(id) {
   const url = `https://www.youtube.com/oembed?url=${encodeURIComponent("https://www.youtube.com/watch?v=" + id)}&format=json`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    const res = await net.fetch(url, { signal: AbortSignal.timeout(6000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const j = await res.json();
     titles.set(id, { title: String(j.title ?? ""), author: String(j.author_name ?? "") });

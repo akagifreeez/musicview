@@ -51,6 +51,7 @@ npm run probe    # 実走E2E(YouTube実サイトで再生/キュー/検索/広�
 electron/main.mjs     メインプロセス。視聴ビュー+検索用隠しビューの管理、IPC、メディアキー、復元
 electron/adblock.cjs  EasyList 形式フィルタエンジン(multiview から流用+3件のバグ修正)
 electron/inject.mjs   サイトに差し込む JS/CSS(状態取得・広告スキップ・可視性スプーフ・抽出)
+electron/yt-preload.cjs + lib/ytprune.cjs   データ層の広告剥ぎ(document-start プリロードと純ロジック)
 electron/preload.cjs  UI ブリッジ(contextBridge)
 renderer/             音楽モードの UI(Liquid Glass 風: アンビエント背景+すりガラスパネル)
 lib/                  純ロジック(URL/キュー/解析/復元)。node --test で直接検証する
@@ -68,10 +69,11 @@ lib/                  純ロジック(URL/キュー/解析/復元)。node --test
 
 ## 広告ブロック
 
-3 段構え。いずれも通信の遮断より「再生が壊れないこと」を優先する。
+4 段構え。いずれも通信の遮断より「再生が壊れないこと」を優先する。
 
+0. データ層の剥ぎ(主役): yt-preload(document-start・main world)がプレイヤーレスポンスから `adPlacements`/`playerAds`/`adSlots` 等を除去する。YouTube のプレイヤーはこれらが無いと広告をスケジュールしないため、広告が鳴る前の情報段階で消える。watch ページに HTML 埋め込みの `ytInitialPlayerResponse` は代入時のプロパティ罠で、SPA 遷移の `/youtubei/v1/player` は fetch/XHR の応答差し替えで剥ぐ(uBlock Origin の json-prune 方式と同じ発想)。実績キーのみに絞り、未知の深掘り削除はしない
 1. webRequest(EasyList + ABPJF、24時間キャッシュ)で広告ドメイン/パターンを遮断
-2. プレイヤー内スキップ: 広告表示中(.ad-showing)はシークを末尾へ飛ばしてスキップボタンを押す注入スクリプト
+2. プレイヤー内スキップ: 0〜1 をすり抜けた広告用の最終防衛線。スキップボタンがある広告はボタンを押す公式経路のみ(強制シークとの競合が遷移を壊すため)、押下直後は遷移中として触らない。スキップ不可の広告だけ出現6秒後にシークを末尾へ飛ばす
 3. CSS でバナー・オーバーレイ広告を非表示
 
 YouTube 自社の計測(`youtube.com/api/stats/`、ptracking)は**意図的に通す**。ここを落とすと再生履歴が更新されず、ミックスが聴き込みを反映しなくなるため。

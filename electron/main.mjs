@@ -195,14 +195,20 @@ function installAdblock(ses) {
 function makeYouTubeView() {
   const v = new WebContentsView({
     webPreferences: {
-      sandbox: true,
-      contextIsolation: true,
+      // yt-preload(データ層の広告剥ぎ)はページスクリプトより先に main world で
+      // 走る必要があるため、このビュー群だけ sandbox/contextIsolation を切る
+      sandbox: false,
+      contextIsolation: false,
+      preload: path.join(ROOT, "electron", "yt-preload.cjs"),
       backgroundThrottling: false, // 非表示でも広告スキップ等のタイマを止めない
       partition: PARTITION,
     },
   });
   v.setBackgroundColor("#0f0f0f");
   const wc = v.webContents;
+  wc.on("preload-error", (_e, preloadPath, error) => {
+    console.error("musicview: yt preload-error", path.basename(preloadPath), error.message);
+  });
   wc.on("dom-ready", () => injectInto(wc));
   // 主役ビューの遷移だけ曲追跡をリセットする(退避ビューの遷移では触れない)
   wc.on("did-navigate", () => { if (v === site) lastVideoId = null; });
@@ -251,8 +257,10 @@ function ensureBrowse() {
   if (browse && !browse.webContents.isDestroyed()) return browse;
   browse = new WebContentsView({
     webPreferences: {
-      sandbox: true,
-      contextIsolation: true,
+      // makeYouTubeView と同じ yt-preload 配線(検索結果側で鳴る埋め込みにも備える)
+      sandbox: false,
+      contextIsolation: false,
+      preload: path.join(ROOT, "electron", "yt-preload.cjs"),
       backgroundThrottling: false,
       partition: PARTITION,
     },
@@ -1188,6 +1196,15 @@ async function runProbe() {
       "qIdx:", late?.snap?.qIdx);
     log("late queue titles:", (late?.queueItems ?? []).slice(0, 4).map(i => JSON.stringify(i.title ?? null)).join(" "));
   }
+
+  // データ層の広告剥ぎ(yt-preload)が動いているか。キーが存在した応答だけ加算されるので
+  // 広告なし動画だけだと 0 のままでも正常
+  try {
+    const pr = await site.webContents.executeJavaScript(
+      `JSON.stringify(window.__mvPrune ?? null)`,
+    );
+    log("yt-prune stats:", pr);
+  } catch (e) { log("yt-prune stats: err", e.message); }
 
   const recs = await extractRecs();
   log("watch recs:", recs.length, "first:", JSON.stringify(recs[0] ?? null));

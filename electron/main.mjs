@@ -750,8 +750,7 @@ async function pollOnce() {
   }
 
   // Discord Rich Presence(曲/再生状態が変わったときだけ送る)
-  // 画像: Developer Portal の Assets にアップロードした "art" を使う
-  // (外部URLは Discord が拒否するため。未アップロードなら画像なしで文字のみ)
+  // 画像: 大=再生中動画のサムネイル(外部直接リンク)、小=アプリのロゴアセット("art")
   const pkey = `${snap.videoId}|${snap.state}|${snap.title}`;
   if (pkey !== lastPresenceKey && discordClient) {
     lastPresenceKey = pkey;
@@ -760,8 +759,10 @@ async function pollOnce() {
         details: snap.title || "YouTube",
         state: snap.author || "musicview",
         startAt: snap.state === 1 ? Date.now() - snap.time * 1000 : undefined,
-        largeImage: "art",
+        largeImage: thumbUrl(snap.videoId),
         largeText: snap.title || "musicview",
+        smallImage: "art",
+        smallText: "musicview",
         type: 2, // LISTENING(〜を再生中)
         buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
       });
@@ -769,7 +770,10 @@ async function pollOnce() {
       discordClient.update({
         details: snap.title || "YouTube",
         state: "一時停止",
-        largeImage: "art",
+        largeImage: thumbUrl(snap.videoId),
+        largeText: snap.title || "musicview",
+        smallImage: "art",
+        smallText: "musicview",
         type: 2,
         buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
         force: true,

@@ -36,7 +36,17 @@
       </select>
       <button id="import" class="btn secondary" title="Firefox / Floorp でログイン済みの YouTube セッションを取り込む(Google のログイン画面を使わない)">取り込み</button>
       <button id="login" class="btn secondary" title="YouTube にログイン(ミックス・おすすめが自分向けになる)">ログイン</button>
+      <button id="dc-btn" class="chip" title="Discord Rich Presence(再生中の曲をプロフィールに表示)">Discord</button>
       <button id="mode" class="btn secondary" title="プレイヤー⇔サイト表示 (Ctrl+M)">サイト表示</button>
+      <div id="dc-panel" class="popover below hidden">
+        <div class="pop-title">Discord Rich Presence <button id="dc-close" class="pop-close">×</button></div>
+        <p class="pop-note">Discord Developer Portal でアプリを作成し、Application ID を貼り付けて保存(一度だけ)。再生中の曲が Discord のプロフィールに表示されます。</p>
+        <div class="pop-row">
+          <input id="dc-id" type="text" placeholder="Application ID(数字)" spellcheck="false" autocomplete="off">
+          <button id="dc-save" class="btn secondary">保存</button>
+        </div>
+        <div id="dc-status" class="pop-note"></div>
+      </div>
     </div>
   </header>
 
@@ -79,22 +89,13 @@
         <div id="eq-panel" class="popover hidden">
           <div class="pop-title">イコライザー <button id="eq-close" class="pop-close">×</button></div>
           <div id="eq-sliders"></div>
-          <div class="pop-row">
+          <div class="pop-row presets">
             <span class="pop-label">プリセット</span>
             <button class="chip" data-preset="flat">フラット</button>
             <button class="chip" data-preset="bass">バスアップ</button>
             <button class="chip" data-preset="clearbass">クリアバス</button>
             <button class="chip" data-preset="vocal">ボーカル</button>
           </div>
-        </div>
-        <div id="dc-panel" class="popover hidden">
-          <div class="pop-title">Discord Rich Presence <button id="dc-close" class="pop-close">×</button></div>
-          <p class="pop-note">Discord Developer Portal でアプリを作成し、Application ID を貼り付けて保存(一度だけ)。再生中の曲が Discord のプロフィールに表示されます。</p>
-          <div class="pop-row">
-            <input id="dc-id" type="text" placeholder="Application ID(数字)" spellcheck="false" autocomplete="off">
-            <button id="dc-save" class="btn secondary">保存</button>
-          </div>
-          <div id="dc-status" class="pop-note"></div>
         </div>
         <div class="aux">
           <div class="vol-wrap">
@@ -116,8 +117,7 @@
             <option value="8">8秒</option>
             <option value="12">12秒</option>
           </select>
-          <button id="eq-btn" class="chip" title="イコライザー / CLEAR BASS">EQ</button>
-          <button id="dc-btn" class="chip" title="Discord Rich Presence">Discord</button>
+          <button id="eq-btn" class="chip" title="EQ: クリック=ON/OFF・右クリック=調整パネル">EQ</button>
           <button id="loop" class="chip" title="この曲をループ">ループ</button>
           <button id="shuffle" class="chip" title="キューを自分で並べ替えて次へ(ミックス継続は切れる)">シャッフル</button>
           <button id="mix" class="chip accent" title="今の曲から YouTube ミックスを開始">この曲からミックス</button>

@@ -148,7 +148,7 @@ body:not(.has-art) #ambient { opacity: 0.5; }
 }
 .icon-btn.text:hover { color: var(--label); }
 
-.tb-right { display: flex; gap: 8px; align-items: center; flex: 1 1 0; justify-content: flex-end; }
+.tb-right { display: flex; gap: 8px; align-items: center; flex: 1 1 0; justify-content: flex-end; position: relative; }
 
 .btn {
   height: 28px;
@@ -360,11 +360,15 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.18); }
   padding: 12px 14px;
   z-index: 6;
 }
+/* トップバーのボタンから下へ開くパネル(Discord) */
+.popover.below { bottom: auto; top: calc(100% + 10px); }
 .pop-title { font-size: 13px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .pop-close { color: var(--label-tertiary); font-size: 14px; }
 .pop-close:hover { color: var(--label); }
 .pop-note { font-size: 11px; color: var(--label-secondary); line-height: 1.7; margin: 6px 0; }
 .pop-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+/* プリセット行はラベル+4チップで幅が足りないため折り返す(文字の縦積み溢れ止め) */
+.pop-row.presets { flex-wrap: wrap; row-gap: 6px; }
 .pop-label { font-size: 11px; color: var(--label-secondary); width: 64px; flex: none; }
 #dc-id {
   flex: 1; height: 28px;
@@ -395,6 +399,7 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.18); }
   background: rgba(255, 255, 255, 0.08);
   font-size: 12px;
   color: var(--label-secondary);
+  white-space: nowrap; /* 狭い行で「フラ/ット」のような縦積みにならないように */
   transition: all var(--duration) var(--ease);
 }
 .chip:hover { background: rgba(255, 255, 255, 0.15); }

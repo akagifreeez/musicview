@@ -33,7 +33,16 @@ let volTouched = false;
 let durShowTotal = false; // 残り時間(-表記)と総時間の切り替え
 let queueScrolledVid = null; // キューの自動スクロール用(曲替わりの一度だけ)
 let mixPendingShown = null;
-let eqGainsLocal = [0, 0, 0, 0, 0];
+// EQはボタンでON/OFFする。スライダーの値はOFFでも覚えており、ONで復帰する。
+// 適用値の真実はメイン側にあるが、押し忘れのないよう起動時にこちらから改めて申し伝える
+let eqOn = localStorage.getItem("mv.eqOn") === "1";
+let eqGainsLocal = (() => {
+  try {
+    const v = JSON.parse(localStorage.getItem("mv.eqGains") ?? "null");
+    return Array.isArray(v) && v.length === 5 ? v.map(Number) : [0, 0, 0, 0, 0];
+  } catch { return [0, 0, 0, 0, 0]; }
+})();
+const eqFlat = [0, 0, 0, 0, 0];
 let eqSendTimer = null;
 let vizTarget = null;    // メインから届いた解析値
 let vizLevels = null;    // 描画中の値(補間用)
@@ -82,6 +91,18 @@ function paintRange(el, pct) {
 }
 
 // ── EQパネル ────────────────────────────────
+function saveEqGains() {
+  localStorage.setItem("mv.eqGains", JSON.stringify(eqGainsLocal));
+}
+
+// ON/OFFの状態と適用値をメインへ反映(ボタン色もここで揃える)
+function setEqOn(v) {
+  eqOn = v;
+  localStorage.setItem("mv.eqOn", v ? "1" : "0");
+  els.eqBtn.classList.toggle("on", v);
+  window.musicview.setEq((v ? eqGainsLocal : eqFlat).slice());
+}
+
 function buildEqPanel() {
   els.eqSliders.innerHTML = EQ_META.map((b, i) => `
     <div class="eq-row">
@@ -96,6 +117,8 @@ function buildEqPanel() {
       eqGainsLocal[i] = Number(r.value);
       els.eqSliders.querySelector(`[data-v="${i}"]`).textContent = r.value;
       paintRange(r, ((Number(r.value) - Number(r.min)) / (Number(r.max) - Number(r.min))) * 100);
+      saveEqGains();
+      if (!eqOn) setEqOn(true); // 触った=鳴らしたい
       clearTimeout(eqSendTimer);
       eqSendTimer = setTimeout(() => window.musicview.setEq(eqGainsLocal.slice()), 150);
     });
@@ -103,8 +126,10 @@ function buildEqPanel() {
   document.querySelectorAll("#eq-panel [data-preset]").forEach(b => {
     b.addEventListener("click", () => {
       eqGainsLocal = EQ_PRESETS[b.dataset.preset].slice();
+      saveEqGains();
       syncEqUI(eqGainsLocal);
-      window.musicview.setEq(eqGainsLocal.slice());
+      if (!eqOn) setEqOn(true);
+      else window.musicview.setEq(eqGainsLocal.slice());
     });
   });
 }
@@ -243,9 +268,10 @@ function render() {
     els.mix.classList.toggle("on", pending);
   }
 
-  // EQパネルが開いているときは値を同期(スライダー触っていないときだけ)
+  // EQパネルが開いているときは値を同期(スライダー触っていないときだけ)。
+  // OFF中は「ONにしたら効く値」=ローカル保持値を見せる
   if (!els.eqPanel.classList.contains("hidden") && document.activeElement?.classList?.contains("eq-range") !== true) {
-    syncEqUI(s.eq ?? [0, 0, 0, 0, 0]);
+    syncEqUI(eqOn && Array.isArray(s.eq) ? s.eq : eqGainsLocal);
   }
 
   // モードはイベントだけでなくポーリングでも同期する(push取りこぼしで
@@ -437,10 +463,15 @@ els.importBtn.addEventListener("click", async () => {
 });
 
 // ── EQ / Discord パネル ──────────────────────
+// EQボタン=ON/OFFスイッチ(使用中は赤)。調整パネルは右クリックで開く
 els.eqBtn.addEventListener("click", () => {
+  setEqOn(!eqOn);
+});
+els.eqBtn.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
   els.eqPanel.classList.toggle("hidden");
   els.dcPanel.classList.add("hidden");
-  if (!els.eqPanel.classList.contains("hidden")) syncEqUI(snap?.eq ?? [0, 0, 0, 0, 0]);
+  if (!els.eqPanel.classList.contains("hidden")) syncEqUI(eqGainsLocal);
 });
 els.eqClose.addEventListener("click", () => els.eqPanel.classList.add("hidden"));
 els.dcBtn.addEventListener("click", () => {
@@ -499,6 +530,8 @@ els.loop.classList.toggle("on", loopOn);
 els.shuffle.classList.toggle("on", shuffleOn);
 window.musicview.setLoop(loopOn);
 buildEqPanel();
+els.eqBtn.classList.toggle("on", eqOn);
+if (eqOn) window.musicview.setEq(eqGainsLocal.slice()); // セッション復元値より保存状態を優先
 drawViz();
 setInterval(poll, 500);
 poll();

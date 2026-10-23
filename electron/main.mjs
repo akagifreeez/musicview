@@ -1258,6 +1258,34 @@ async function runProbe() {
   await sleep(1200);
   await probeShot(win.webContents, path.join(DATA_DIR, "probe", "probe-music.png"));
 
+  // EQボタンの新挙動(E2E): クリック=ON/OFF(赤化)・右クリック=パネル。
+  // プリセット適用→ボタンが赤くなる→パネルの折り返し含めてスクショで確認
+  try {
+    const eqUi = await win.webContents.executeJavaScript(`(async function () {
+      const btn = document.getElementById("eq-btn");
+      btn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      await new Promise(r => setTimeout(r, 300));
+      const preset = document.querySelector('#eq-panel [data-preset="bass"]');
+      preset.click();
+      await new Promise(r => setTimeout(r, 400));
+      return {
+        on: btn.classList.contains("on"),
+        panelOpen: !document.getElementById("eq-panel").classList.contains("hidden"),
+        presetWrapHeight: document.querySelector(".pop-row.presets").offsetHeight,
+      };
+    })()`);
+    log("eq-toggle:", JSON.stringify(eqUi));
+    await probeShot(win.webContents, path.join(DATA_DIR, "probe", "probe-eq.png"));
+    await win.webContents.executeJavaScript(`(function () {
+      document.getElementById("eq-close").click();
+      document.getElementById("eq-btn").click(); // OFFへ戻す(赤が消える)
+    })()`);
+    const eqOff = await win.webContents.executeJavaScript(
+      `!document.getElementById("eq-btn").classList.contains("on")`,
+    );
+    log("eq-toggle off:", eqOff ? "OK" : "NG");
+  } catch (e) { log("eq-toggle err:", e.message); }
+
   setMode("site");
   await sleep(1500);
   await probeShot(site.webContents, path.join(DATA_DIR, "probe", "probe-site.png"));

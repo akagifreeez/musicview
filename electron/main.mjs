@@ -1420,19 +1420,29 @@ async function runProbeDiscord() {
   await sleep(5000);
   log("connected:", dc.connected);
   if (dc.connected) {
-    dc.update({
-      details: "musicview 接続テスト",
-      state: "large=art / small=icon のどちらかに画像が出る",
-      startAt: Date.now() - 10000,
-      largeImage: "art",
-      largeText: "art",
-      smallImage: "icon",
-      smallText: "icon",
-      buttons: [{ label: "GitHub", url: "https://github.com/akagifreeez/musicview" }],
-      force: true,
-    });
-    log("test presence sent — 10秒間表示されます");
-    await sleep(10000);
+    // 外部画像の形式スイープ: どの書き方なら Discord が画像を取得するかを特定する
+    const url = thumbUrl("dQw4w9WgXcQ");
+    const noproto = url.replace(/^https?:\/\//, "");
+    const variants = [
+      ["V1 enc", `mp:external/${encodeURIComponent(url)}`],
+      ["V2 enc-noproto", `mp:external/${encodeURIComponent(noproto)}`],
+      ["V3 raw-noproto", `mp:external/${noproto}`],
+      ["V4 base64url", `mp:external/${Buffer.from(url).toString("base64url")}`],
+      ["V5 plain-noproto", noproto],
+      ["V6 plain-url", url],
+    ];
+    for (const [label, key] of variants) {
+      dc.update({
+        details: `画像形式テスト: ${label}`,
+        state: "この番号の画像が出たか教えてください",
+        startAt: Date.now() - 10000,
+        largeImage: key,
+        largeText: label,
+        force: true,
+      });
+      log(label, "sent");
+      await sleep(12000);
+    }
     dc.clear();
     await sleep(1000);
   }

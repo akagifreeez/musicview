@@ -9,17 +9,32 @@ export const SITE_BOOTSTRAP = `
     var el = p();
     return !!(el && el.classList && el.classList.contains("ad-showing"));
   };
+  // 広告対策。スキップ可能な広告はボタンを押す公式経路だけ使う(強制シークとの競合が
+  // プレイヤーの遷移を壊す元)。スキップ不可の広告だけ出現6秒後に尻切れにする。
+  // 押下直後は遷移中なので動画に触らない(本体動画を誤シークして曲が飛ぶ事故止め)
+  var adSeenAt = 0;
+  var skipClickedAt = 0;
+  var adSeekAt = 0;
   var skipTick = function () {
     try {
-      if (!adVisible()) return;
-      var v = document.querySelector("video.html5-main-video");
-      if (v && v.duration && isFinite(v.duration)) {
-        try { v.currentTime = Math.max(0, v.duration - 0.4); } catch (e) {}
-      }
-      var skip = document.querySelector(".ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button");
-      if (skip) skip.click();
+      if (!adVisible()) { adSeenAt = 0; return; }
+      var now = Date.now();
+      if (!adSeenAt) adSeenAt = now;
       var close = document.querySelector(".ytp-ad-overlay-close-button");
-      if (close) close.click();
+      if (close) { try { close.click(); } catch (e) {} }
+      if (now - skipClickedAt < 2500) return;
+      var skip = document.querySelector(".ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button");
+      if (skip) {
+        try { skip.click(); } catch (e) {}
+        skipClickedAt = now;
+        return;
+      }
+      if (now - adSeenAt < 6000 || now - adSeekAt < 1500) return;
+      var v = document.querySelector("video.html5-main-video");
+      if (v && v.duration && isFinite(v.duration) && v.duration > 2) {
+        try { v.currentTime = Math.max(0, v.duration - 0.4); } catch (e) {}
+        adSeekAt = now;
+      }
     } catch (e) {}
   };
   var snap = function () {

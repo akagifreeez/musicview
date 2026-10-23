@@ -193,8 +193,11 @@ function render() {
     }
   }
 
-  // 進行(ドラッグ中は触らない)。右側の時間は Apple Music 風に残り表示
-  if (!seekDragging) {
+  // 進行(ドラッグ中は触らない)。右側の時間は Apple Music 風に残り表示。
+  // 広告中は time/dur が広告側のタイムラインになるため表示を凍結し「広告」と出す
+  if (p.ad) {
+    els.tDur.textContent = "広告";
+  } else if (!seekDragging) {
     const pct = p.dur > 0 ? (p.time / p.dur) * 100 : 0;
     els.seek.value = Math.round(pct * 10);
     paintRange(els.seek, pct);
@@ -352,7 +355,7 @@ els.fwd30.addEventListener("click", () => seekBy(30));
 
 function seekBy(delta) {
   const p = snap?.snap;
-  if (!p) return;
+  if (!p || p.ad) return; // 広告中のシークは広告側を掴むので無視
   const to = Math.min(Math.max(0, (p.time ?? 0) + delta), p.dur || 0);
   window.musicview.cmd("seek", to);
 }
@@ -360,12 +363,13 @@ function seekBy(delta) {
 els.seek.addEventListener("input", () => {
   seekDragging = true;
   const p = snap?.snap;
+  if (p?.ad) return;
   paintRange(els.seek, Number(els.seek.value) / 10);
   if (p?.dur) els.tCur.textContent = fmt((Number(els.seek.value) / 1000) * p.dur);
 });
 els.seek.addEventListener("change", () => {
   const p = snap?.snap;
-  if (p?.dur) window.musicview.cmd("seek", (Number(els.seek.value) / 1000) * p.dur);
+  if (p?.dur && !p.ad) window.musicview.cmd("seek", (Number(els.seek.value) / 1000) * p.dur);
   seekDragging = false;
 });
 

@@ -557,9 +557,19 @@ async function tickXfade() {
     return;
   }
 
-  // 広告中 / 未開始: プレイヤーミュート+再生を蹴り続け(ミュートなら自動再生が必ず通り、
-  // 無音)、詰まっていたら読み直して広告の判断をやり直す
-  if (st.ad || st.state === -1 || st.state === 5) {
+  // 待機ビューが広告中: スキップは skipTick に任せ、再生キックだけ続ける。
+  // 広告の進行中に読み直すと広告が最初からやり直しになり、待機が永久に終わらない
+  if (st.ad) {
+    if (Date.now() - xfade.lastKick > 800) {
+      xfade.lastKick = Date.now();
+      await execOn(xfadeView, `window.__mvCtl.cmd("play")`);
+    }
+    return;
+  }
+
+  // 未開始: プレイヤーミュート+再生を蹴り続け(ミュートなら自動再生が必ず通り、
+  // 無音)、詰まっていたら読み直して再生開始をやり直す
+  if (st.state === -1 || st.state === 5) {
     if (Date.now() - xfade.lastKick > 800) {
       xfade.lastKick = Date.now();
       xfade.kicks++;
@@ -654,8 +664,9 @@ async function tickXfade() {
     return;
   }
 
-  // 保留からのフェード開始(手動は準備完了直後=即応、自動はフェード窓)
-  if (xfade.phase === "hold" && (xfade.manual || remain <= xfadeSec + 0.5)) {
+  // 保留からのフェード開始(手動は準備完了直後=即応、自動はフェード窓)。
+  // 待機ビューが広告中は広告をフェードインしてしまうため、抜けるまで待つ
+  if (xfade.phase === "hold" && !st.ad && (xfade.manual || remain <= xfadeSec + 0.5)) {
     startFade(st.state);
   }
 }
@@ -679,6 +690,8 @@ async function fadeStep() {
   }
   const m = await snapOf(site);
   const st = await snapOf(xfadeView);
+  // 主役が広告に入ると time/dur が広告のタイムラインになるため、進行計算も終了判定も保留する
+  if (m && m.ad) return;
   const base = desiredVol;
   // 進捗の基準: 手動遷移=開始からの経過時間(今すぐ切り替えるのが目的)、
   // 自動=主役の残り時間(xfadeSec 前から 0 → 曲末で 1)
@@ -752,7 +765,8 @@ async function pollOnce() {
   // Discord Rich Presence(曲/再生状態が変わったときだけ送る)
   // 画像: 大=再生中動画のサムネイル(外部直接リンク)、小=アプリのロゴアセット("art")
   const pkey = `${snap.videoId}|${snap.state}|${snap.title}`;
-  if (pkey !== lastPresenceKey && discordClient) {
+  // 広告中は state/time が広告側に引っ張られるので presence を更新しない(楽曲表示を維持)
+  if (!snap.ad && pkey !== lastPresenceKey && discordClient) {
     lastPresenceKey = pkey;
     const presencePayload = {
       largeImage: thumbUrl(snap.videoId),

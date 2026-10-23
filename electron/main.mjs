@@ -1,7 +1,7 @@
 // musicview — YouTube 動画を音楽として聴くことに特化したプレイヤー
 // 実サイト(youtube.com)を WebContentsView で包み、音楽向けの操作面を上に重ねる。
 // 広告は webRequest(EasyList エンジン)+ プレイヤー内スキップ + CSS 隠しの 3 段構え
-import { app, BrowserWindow, WebContentsView, ipcMain, globalShortcut, session } from "electron";
+import { app, BrowserWindow, WebContentsView, ipcMain, globalShortcut, session, contentTracing } from "electron";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -226,6 +226,30 @@ function makeYouTubeView() {
   const wc = v.webContents;
   wc.on("preload-error", (_e, preloadPath, error) => {
     console.error("musicview: yt preload-error", path.basename(preloadPath), error.message);
+  });
+  // ページのコンソールエラー。音声デバイス/WebAudioレンダラーが死ぬと
+  // 「AudioContext encountered an error」が解析ポンプの周期(約90ms)で無限に出続け、
+  // メインプロセスがログ書き出しでCPUを食い潰す(実測で44%)ため:
+  //  3回検知したらそのビューのWebAudioを諦めさせて素通しに切り替え、
+  //  ログは同一メッセージを10秒に1回へ間引く
+  let acFails = 0, lastMsg = "", lastMsgAt = 0;
+  wc.on("console-message", (_e, level, message) => {
+    const msg = String(message || "");
+    if (msg.indexOf("AudioContext") !== -1) {
+      if (++acFails === 3) {
+        console.error("musicview: audio device error flood, disabling webaudio on this view");
+        wc.executeJavaScript(`try { window.__mvCtl.cmd("teardownAudio"); } catch (e) { window.__mvAudioDisabled = true; }`)
+          .catch(() => {});
+      }
+      return; // フラッド中は個別に記録しない
+    }
+    if (level >= 3) {
+      const now = Date.now();
+      if (msg === lastMsg && now - lastMsgAt < 10000) return;
+      lastMsg = msg;
+      lastMsgAt = now;
+      console.error("musicview: yt console:", msg.slice(0, 180));
+    }
   });
   // レンダラー/GPU の死は「画面が止まる」としてしか見えないので、原因追えるよう常時記録し、
   // 主役が死んだ場合は同じURLを作り直して「読み込みが終わらないまま放置」を防ぐ
@@ -1637,18 +1661,20 @@ async function runProbeSpa() {
   for (let r = 1; r <= 6; r++) {
     const pick = await wc.executeJavaScript(`(function () {
       try {
-      // フィードの実体はシャドウDOM配下のロックアップ(JS遷移・hrefなし)。潜って探す
+      // フィードの実体はシャドウDOM配下のロックアップ(JS遷移・hrefなし)。
+      // 深い再帰はスタックを溢れさせるので明示スタックで潜る
       var items = [];
-      function walk(root) {
+      var stack = [document];
+      while (stack.length) {
+        var root = stack.pop();
         try {
           root.querySelectorAll("yt-lockup-view-model, ytd-rich-item-renderer").forEach(function (a) { items.push(a); });
         } catch (e) {}
         try {
           var all = root.querySelectorAll("*");
-          for (var i = 0; i < all.length; i++) { if (all[i].shadowRoot) walk(all[i].shadowRoot); }
+          for (var i = 0; i < all.length; i++) { if (all[i].shadowRoot) stack.push(all[i].shadowRoot); }
         } catch (e) {}
       }
-      walk(document);
       var cur = window.__mvCtl ? (window.__mvCtl.snap() || {}).videoId : null;
       var ok = items.filter(function (el) {
         try {
@@ -1989,6 +2015,30 @@ app.whenReady().then(async () => {
 
   if (IS_PROBE) runProbe().catch(e => { console.error("probe error:", e); app.exit(1); });
   if (IS_SPA_PROBE) runProbeSpa().catch(e => { console.error("spa error:", e); app.exit(1); });
+
+  // 調査用: メディアパイプラインとネットワークの詳細トレースを記録する。
+  // --trace-media で起動し、止まりを再現したら F10 で保存(data/trace-media-*.json)。
+  // 通常トレースに無い MediaLog(パイプライン状態/バッファ/エラー)を捕まえるのが目的
+  if (argv.includes("--trace-media")) {
+    const config = {
+      included_categories: ["media", "benchmark", "devtools.timeline", "disabled-by-default-devtools.timeline"],
+      record_mode: "record-continuously",
+    };
+    contentTracing.startRecording(config)
+      .then(() => console.log("trace-media: recording started (F10 で保存)"))
+      .catch(e => console.error("trace-media: start failed", e.message));
+    const save = async () => {
+      try {
+        const out = path.join(DATA_DIR, `trace-media-${Date.now()}.json`);
+        const p = await contentTracing.stopRecording(out);
+        console.log("trace-media: saved", p);
+      } catch (e) { console.error("trace-media: stop failed", e.message); }
+    };
+    globalShortcut.register("F10", save);
+    if (process.env.MUSICVIEW_TRACE_STOP_MS) {
+      setTimeout(save, Number(process.env.MUSICVIEW_TRACE_STOP_MS) || 15000);
+    }
+  }
   if (IS_IMPORT_PROBE) runProbeImport().catch(e => { console.error("probe-import error:", e); app.exit(1); });
   if (IS_DESKTOP_PROBE) runProbeDesktop().catch(e => { console.error("probe-desktop error:", e); app.exit(1); });
   if (argv.includes("--probe-xfade")) runProbeXfade().catch(e => { console.error("probe-xfade error:", e); app.exit(1); });

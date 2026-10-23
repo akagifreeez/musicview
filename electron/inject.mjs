@@ -83,6 +83,7 @@ export const SITE_BOOTSTRAP = `
       else if (name === "playAt") el.playVideoAt(Number(arg) || 0);
       else if (name === "load") el.loadVideoById(String(arg));
       else if (name === "eq") return ctlEq(arg);
+      else if (name === "teardownAudio") { hardTeardown(); window.__mvAudioDisabled = true; return "ok"; }
       else return "unknown";
       return "ok";
     } catch (e) { return "error"; }

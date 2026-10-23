@@ -4,3 +4,4 @@ release/
 *.log
 Trace-*.json.gz
 data/trace-media-*.json
+media-analysis.txt

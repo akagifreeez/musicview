@@ -759,8 +759,10 @@ async function pollOnce() {
         details: snap.title || "YouTube",
         state: snap.author || "musicview",
         startAt: snap.state === 1 ? Date.now() - snap.time * 1000 : undefined,
-        largeImage: "art",
+        largeImage: thumbUrl(snap.videoId),
         largeText: snap.title || "musicview",
+        smallImage: "art",
+        smallText: "musicview",
         type: 2, // LISTENING(〜を再生中)
         buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
       });
@@ -768,7 +770,10 @@ async function pollOnce() {
       discordClient.update({
         details: snap.title || "YouTube",
         state: "一時停止",
-        largeImage: "art",
+        largeImage: thumbUrl(snap.videoId),
+        largeText: snap.title || "musicview",
+        smallImage: "art",
+        smallText: "musicview",
         type: 2,
         buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
         force: true,

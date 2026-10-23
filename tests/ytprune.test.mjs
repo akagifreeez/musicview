@@ -49,71 +49,63 @@ test("yt-preload.cjs は Node で読み込んでも無害(ブラウザ配線は�
   assert.doesNotThrow(() => require("../electron/yt-preload.cjs"));
 });
 
-// ── 実機でしか起きなかった「動画クリックで読み込み停止」の回帰テスト ──
+// ── JSON.parse フック(SPA遷移でプレイヤーが交換されない事故の置き換え) ──
 
-class FakeXHR {
-  constructor() {
-    this.readyState = 0;
-    this.responseType = "";
-    this._listeners = {};
-    this._text = "";
-  }
-  addEventListener(t, fn) { (this._listeners[t] ??= []).push(fn); }
-  _fire(t) { for (const fn of this._listeners[t] ?? []) fn(); }
-}
-Object.defineProperty(FakeXHR.prototype, "responseText", {
-  get() { return this._text; }, configurable: true,
-});
-Object.defineProperty(FakeXHR.prototype, "response", {
-  get() { return this._text; }, configurable: true,
-});
-FakeXHR.prototype.open = function () { this._url = arguments[1]; };
-FakeXHR.prototype.send = function () {};
+class FakeXHR { open() {} send() {} }
 
-class FakeResponse {
-  constructor(body, init) { this.body = body; this.init = init; }
+function makeEnv() {
+  const win = {
+    JSON: { parse: function parse(text, reviver) { return JSON.parse(text, reviver); } },
+    process: { versions: {} },
+  };
+  return { win };
 }
 
-test("yt-preload: 使い回したXHRでも影が残らず新しい応答が読める(クリック停止の回帰)", () => {
+test("yt-preload: JSON.parseフックがプレイヤー応答の広告キーを剥ぐ", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
-  installHooks({ window: {}, XMLHttpRequest: FakeXHR, Response: FakeResponse });
-
-  const xhr = new FakeXHR();
-  xhr.open("POST", "/youtubei/v1/player?key=1");
-  xhr.send();
-  xhr.readyState = 4;
-  xhr._text = JSON.stringify({ adPlacements: [1], videoDetails: { videoId: "first" } });
-  xhr._fire("readystatechange");
-  const j1 = JSON.parse(xhr.responseText);
-  assert.ok(!("adPlacements" in j1), "1回目の応答から広告キーが剥がれる");
-
-  // 同一インスタンスを再利用。open 時点で影が落ちているので新しい応答がそのまま見え、
-  // readyState 4 の再判定で剥ぎ直される
-  xhr.open("POST", "/youtubei/v1/player?key=2");
-  xhr._text = JSON.stringify({ adPlacements: [1], videoDetails: { videoId: "second" } });
-  assert.equal(JSON.parse(xhr.responseText).videoDetails.videoId, "second", "open で影が落ちている");
-  xhr._fire("readystatechange");
-  const j2 = JSON.parse(xhr.responseText);
-  assert.ok(!("adPlacements" in j2), "2回目の応答も剥がれる");
-  assert.equal(j2.videoDetails.videoId, "second");
+  const { win } = makeEnv();
+  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  const j = win.JSON.parse(JSON.stringify({
+    adPlacements: [1], playerAds: [1], adSlots: [1],
+    videoDetails: { videoId: "x" },
+  }));
+  assert.ok(!("adPlacements" in j));
+  assert.ok(!("playerAds" in j));
+  assert.ok(!("adSlots" in j));
+  assert.equal(j.videoDetails.videoId, "x");
+  assert.ok(win.__mvPrune.parse >= 1);
 });
 
-test("yt-preload: プレイヤー以外のURLはXHRフックの対象外", () => {
+test("yt-preload: 広告キーの無いパースは改変せず素通し", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
-  installHooks({ window: {}, XMLHttpRequest: FakeXHR, Response: FakeResponse });
-  const xhr = new FakeXHR();
-  xhr.open("GET", "/youtubei/v1/browse");
-  xhr.send();
-  xhr.readyState = 4;
-  xhr._text = JSON.stringify({ adPlacements: [1] });
-  xhr._fire("readystatechange");
-  assert.ok("adPlacements" in JSON.parse(xhr.responseText), "非対象URLは改変しない");
+  const { win } = makeEnv();
+  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  const before = win.JSON.parse;
+  const j = win.JSON.parse('{"videoDetails":{"videoId":"y"},"streamingData":{}}');
+  assert.deepEqual(j, { videoDetails: { videoId: "y" }, streamingData: {} });
+  assert.equal(win.JSON.parse, before, "対象外のパースではフックは何もしない(関数自体は同じ)");
+});
+
+test("yt-preload: 配列・プリミティブのパース結果は対象外", () => {
+  const { installHooks } = require("../electron/yt-preload.cjs");
+  const { win } = makeEnv();
+  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  assert.deepEqual(win.JSON.parse("[1,2,3]"), [1, 2, 3]);
+  assert.equal(win.JSON.parse('"str"'), "str");
+  assert.equal(win.JSON.parse("42"), 42);
+});
+
+test("yt-preload: パースエラーはフックで握り潰さずそのまま投げる", () => {
+  const { installHooks } = require("../electron/yt-preload.cjs");
+  const { win } = makeEnv();
+  installHooks({ window: win, XMLHttpRequest: FakeXHR });
+  assert.throws(() => win.JSON.parse("not-json"));
 });
 
 test("yt-preload: ytInitialPlayerResponse の代入罠で剥げる", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
   const win = {};
-  installHooks({ window: win, XMLHttpRequest: FakeXHR, Response: FakeResponse });
+  installHooks({ window: win, XMLHttpRequest: FakeXHR });
   win.ytInitialPlayerResponse = { adPlacements: [1], playerAds: [1], videoDetails: { videoId: "x" } };
   assert.ok(!("adPlacements" in win.ytInitialPlayerResponse));
   assert.ok(!("playerAds" in win.ytInitialPlayerResponse));
@@ -121,35 +113,10 @@ test("yt-preload: ytInitialPlayerResponse の代入罠で剥げる", () => {
   assert.ok(win.__mvPrune.inline >= 1);
 });
 
-test("yt-preload: fetchの/youtubei/v1/player応答が剥がれて差し替わる(対象外は素通し)", async () => {
-  const { installHooks } = require("../electron/yt-preload.cjs");
-  const playerObj = { adPlacements: [1], videoDetails: { videoId: "x" } };
-  let captured = null;
-  const fakeRes = {
-    status: 200, statusText: "OK",
-    headers: { "content-type": "application/json" },
-    clone() { return { json: async () => playerObj }; },
-  };
-  const win = {
-    fetch: async () => fakeRes,
-  };
-  installHooks({ window: win, XMLHttpRequest: FakeXHR, Response: FakeResponse });
-
-  const res1 = await win.fetch("/youtubei/v1/player?key=1");
-  assert.ok(res1 instanceof FakeResponse, "player応答は差し替えられたResponse");
-  const j = JSON.parse(res1.body);
-  assert.ok(!("adPlacements" in j));
-  assert.equal(res1.init.status, 200);
-  assert.deepEqual(res1.init.headers, { "content-type": "application/json" });
-
-  const res2 = await win.fetch("https://example.com/api");
-  assert.equal(res2, fakeRes, "対象外URLは元の応答を素通し");
-});
-
 test("yt-preload: Electron由来グローバルの漏れを落とす(process等)", () => {
   const { installHooks } = require("../electron/yt-preload.cjs");
   const win = { process: { versions: {} }, Buffer: function () {}, setImmediate: function () {} };
-  installHooks({ window: win, XMLHttpRequest: FakeXHR, Response: FakeResponse });
+  installHooks({ window: win, XMLHttpRequest: FakeXHR });
   assert.equal(win.process, undefined);
   assert.equal(win.Buffer, undefined);
   assert.equal(win.setImmediate, undefined);

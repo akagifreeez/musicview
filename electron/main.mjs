@@ -229,9 +229,21 @@ function makeYouTubeView() {
     }, 1500);
   });
   wc.on("dom-ready", () => injectInto(wc));
-  // 主役ビューの遷移だけ曲追跡をリセットする(退避ビューの遷移では触れない)
-  wc.on("did-navigate", () => { if (v === site) lastVideoId = null; });
-  wc.on("did-navigate-in-page", () => { if (v === site) lastVideoId = null; });
+  // 主役ビューの遷移だけ曲追跡をリセットする(退避ビューの遷移では触れない)。
+  // ユーザーが画面内で遷移した=意図が変わったので、進行中のクロスフェードは打ち切る
+  // (放置すると待機ビューが裏で完走し、クリックした曲と無関係な交代/駐車が起きる)
+  wc.on("did-navigate", () => {
+    if (v === site) {
+      lastVideoId = null;
+      if (xfade) cancelXfade("user navigation");
+    }
+  });
+  wc.on("did-navigate-in-page", () => {
+    if (v === site) {
+      lastVideoId = null;
+      if (xfade) cancelXfade("user in-page navigation");
+    }
+  });
   // サイト表示中はキーボードが YouTube 側に取られるため、Ctrl+M だけは横取りして
   // プレイヤー⇔サイトの切替に使う(YouTube 自体の操作は壊さない)
   wc.on("before-input-event", (event, input) => {
@@ -1476,6 +1488,11 @@ async function runProbe() {
 async function runProbeSpa() {
   const log = (...a) => console.log("spa:", ...a);
   await sleep(2000);
+  // 切り分け用: セッションのクロスフェード設定を無効化して観測する(衝突の有無を分離)
+  if (process.env.MUSICVIEW_SPA_NOXFADE === "1") {
+    xfadeSec = 0;
+    log("xfade disabled for this run");
+  }
   ensureSite();
   setMode("site");
   const wc = site.webContents;
@@ -1552,53 +1569,104 @@ async function runProbeSpa() {
   } catch (e) { log("shot err:", e.message); }
   log("home census:", census);
 
-  const clicked = await wc.executeJavaScript(`(function () {
-    // ポリマーUIが死んでいる場合にユーザーが実際に押すのは素の<a>。それを再現する
-    var anchors = [...document.querySelectorAll("a[href*='/watch']")];
-    var pick = anchors.find(function (a) {
-      var v = new URLSearchParams(a.href || "").get("v");
-      return v && v !== (window.__mvCtl ? (window.__mvCtl.snap() || {}).videoId : null);
-    });
-    if (!pick) return "no-watch-anchor(x" + anchors.length + ")";
-    var r = pick.getBoundingClientRect();
-    pick.click();
-    return "anchor:" + (pick.href || "").slice(0, 60) + " @" + Math.round(r.x) + "," + Math.round(r.y);
-  })()`);
-  log("clicked:", JSON.stringify(clicked));
+  // 観測ループ: 見えているサムネ(可視アンカー)を実際にクリックし、遷移→再生開始
+  // までの時間を追跡する。40秒再生に至らなければ STALL として記録。複数回繰り返して
+  // 間発性の止まりを捕まえる
+  const acCount = { n: 0 };
+  wc.on("console-message", (_e, _level, message) => {
+    if (String(message || "").indexOf("AudioContext") !== -1) acCount.n++;
+  });
+  const readState = () => Promise.race([
+    wc.executeJavaScript(`JSON.stringify((function () {
+      var s = window.__mvCtl ? (window.__mvCtl.snap() || {}) : {};
+      var v = document.querySelector("video.html5-main-video");
+      var sp = document.querySelector(".ytp-spinner");
+      return {
+        href: location.href.slice(0, 80),
+        vid: s.videoId || null,
+        state: s.state ?? null,
+        ad: !!document.querySelector(".ad-showing"),
+        spinner: sp ? !sp.hasAttribute("hidden") : false,
+        vidT: v ? Math.round(v.currentTime * 10) / 10 : null,
+        vidPaused: v ? v.paused : null,
+        acErr: window.__mvAcErr || 0,
+        prune: window.__mvPrune ? JSON.stringify(window.__mvPrune) : null
+      };
+    })())`).catch(e => "exec-err:" + String(e && e.message).slice(0, 80)),
+    new Promise(r => setTimeout(() => r("EXEC-STUCK-5s(レンダラー無応答)"), 5000)),
+  ]);
 
-  let done = false;
-  const navigated = typeof clicked === "string" && clicked.startsWith("anchor:");
-  if (!navigated) log("NOTE: クリック対象が無く遷移していない(骨格ページの可能性)");
-  for (let i = 1; i <= 12 && !done; i++) {
-    await sleep(3000);
-    const st = await Promise.race([
-      wc.executeJavaScript(`JSON.stringify((function () {
-        var s = window.__mvCtl ? (window.__mvCtl.snap() || {}) : {};
-        var v = document.querySelector("video.html5-main-video");
-        var sp = document.querySelector(".ytp-spinner");
-        return {
-          href: location.href.slice(0, 100),
-          ready: document.readyState,
-          vid: s.videoId || null,
-          state: s.state ?? null,
-          ad: !!document.querySelector(".ad-showing"),
-          spinner: sp ? !sp.hasAttribute("hidden") : false,
-          vidT: v ? Math.round(v.currentTime * 10) / 10 : null,
-          vidPaused: v ? v.paused : null,
-          prune: window.__mvPrune ? JSON.stringify(window.__mvPrune) : null
-        };
-      })())`).catch(e => "exec-err:" + String(e && e.message).slice(0, 80)),
-      new Promise(r => setTimeout(() => r("EXEC-STUCK-5s(レンダラー無応答)"), 5000)),
-    ]);
-    log(`t=${i * 3}s:`, st);
-    if (navigated && typeof st === "string" && st.indexOf("{") === 0) {
+  let stalls = 0, okays = 0;
+  for (let r = 1; r <= 6; r++) {
+    const pick = await wc.executeJavaScript(`(function () {
       try {
-        const p = JSON.parse(st);
-        if (p.vid && p.state === 1 && !p.ad && p.vidT > 1) { log("RESULT: PLAYING-OK(クリック後の遷移と再生を確認)"); done = true; }
-      } catch { /* 次へ */ }
+      // フィードの実体はシャドウDOM配下のロックアップ(JS遷移・hrefなし)。潜って探す
+      var items = [];
+      function walk(root) {
+        try {
+          root.querySelectorAll("yt-lockup-view-model, ytd-rich-item-renderer").forEach(function (a) { items.push(a); });
+        } catch (e) {}
+        try {
+          var all = root.querySelectorAll("*");
+          for (var i = 0; i < all.length; i++) { if (all[i].shadowRoot) walk(all[i].shadowRoot); }
+        } catch (e) {}
+      }
+      walk(document);
+      var cur = window.__mvCtl ? (window.__mvCtl.snap() || {}).videoId : null;
+      var ok = items.filter(function (el) {
+        try {
+          var r = el.getBoundingClientRect();
+          return r.width >= 180 && r.height >= 80;
+        } catch (e) { return false; }
+      });
+      if (!ok.length) return null;
+      var el = ok[Math.floor(Math.random() * Math.min(ok.length, 6))];
+      // 動画ID: data属性 → サムネimgのURL(/vi/<ID>/) → data JSON の順で拾う
+      var v = el.getAttribute("content-id") || el.getAttribute("contentId") || null;
+      if (!v) {
+        try {
+          var m = (el.innerHTML || "").match(/\/vi\/([a-zA-Z0-9_-]{11})\//);
+          if (m && m[1]) v = m[1];
+        } catch (e) {}
+      }
+      if (!v) {
+        try {
+          var m2 = JSON.stringify(el.data || el.__data || "").match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+          if (m2 && m2[1]) v = m2[1];
+        } catch (e) {}
+      }
+      if (!v) return null; // ID不明の lockup は押さない(無駄打ち防止)
+      try { el.scrollIntoView({ block: "center" }); } catch (e) {}
+      // サムネ画像部分をクリックする(ユーザーと同じ target)
+      var thumb = el.querySelector("img, yt-image, *[class*=thumbnail]") || el;
+      thumb.click();
+      return v;
+      } catch (e) { return "err:" + String(e && e.message).slice(0, 80); }
+    })()`).catch(e => "click-err:" + String(e && e.message).slice(0, 60));
+    if (typeof pick !== "string" || !/^[a-zA-Z0-9_-]{11}$/.test(pick)) {
+      log(`round${r}: クリック対象なし(${JSON.stringify(pick)}) — 3秒後に再試行`);
+      await sleep(3000);
+      continue;
     }
+    log(`round${r}: サムネクリック -> ${pick}`);
+    const t0 = Date.now();
+    let played = false;
+    for (let i = 1; i <= 20 && !played; i++) {
+      await sleep(2000);
+      const st = await readState();
+      log(`  r${r} +${Math.round((Date.now() - t0) / 1000)}s:`, st);
+      if (typeof st === "string" && st.indexOf("{") === 0) {
+        try {
+          const p = JSON.parse(st);
+          if (p.vid === pick && p.state === 1 && !p.ad && Number(p.vidT) > 1) played = true;
+        } catch { /* 次へ */ }
+      }
+    }
+    const took = Math.round((Date.now() - t0) / 1000);
+    if (played) { okays++; log(`round${r}: OK(${took}秒で再生開始) acErr=${acCount.n}`); }
+    else { stalls++; log(`round${r}: STALL(40秒で再生に至らず) acErr=${acCount.n}`); }
   }
-  if (!done && navigated) log("RESULT: NOT-PLAYING(止まり再現の疑い) — 上記の時系列を解析のこと");
+  log(`RESULT: ok=${okays} stall=${stalls} audioContextErr累計=${acCount.n}`);
   wc.removeListener("console-message", onConsole);
   app.exit(0);
 }

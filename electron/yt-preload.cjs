@@ -2,7 +2,9 @@
 // YouTube ビュー用 document-start プリロード(main world / contextIsolation:false)。
 // 広告をネットワーク遮断ではなくデータ層で外す第0層:
 //   1) watch ページに HTML 埋め込みの ytInitialPlayerResponse を代入時にフックして剥ぐ
-//   2) SPA 遷移が取得する /youtubei/v1/player の応答を fetch / XHR の両経路で剥ぐ
+//   2) JSON.parse をフックし、プレイヤーレスポンスのルートに広告キーが現れた時点で剥ぐ
+//      (fetch/XHR の応答は一切書き換えない。応答オブジェクトの再構築は YouTube 側の
+//       消費で失敗する事故(SPA遷移でプレイヤーが交換されない)を起こしたため廃止)
 // 剥げなかった広告の後段は SITE_BOOTSTRAP の skipTick と adblock.cjs(CSS+遮断)が担う。
 // 統計は window.__mvPrune に置き、probe から実走確認できるようにする。
 // 配線は installHooks(差し込み先)に括り出してあり、Node のテストからも同じ経路を
@@ -12,8 +14,7 @@ const { prunePlayerResponse } = require("../lib/ytprune.cjs");
 function installHooks(env) {
   const win = env.window;
   const XHR = env.XMLHttpRequest;
-  const ResCtor = env.Response;
-  const stats = { inline: 0, fetch: 0, xhr: 0, err: 0 };
+  const stats = { inline: 0, parse: 0, err: 0 };
   try { win.__mvPrune = stats; } catch (e) {}
 
   // contextIsolation:false のとき Electron の Node 由来グローバルがページに漏れる。
@@ -40,79 +41,32 @@ function installHooks(env) {
     });
   } catch (e) { stats.err++; }
 
-  // 2a) fetch 経路。プレイヤーへの応答だけ差し替え、それ以外は素通し
+  // 2) JSON.parse 経路。応答オブジェクトには触れず、パース結果のルートだけを見る。
+  // fetch/XHR どちらで取得しても最終的に JSON.parse を通るため、応答の差し替えより
+  // 透過的(失敗モードが存在しない)
   try {
-    const of = win.fetch;
-    if (typeof of === "function") {
-      win.fetch = function () {
-        let url = "";
+    const op = win.JSON.parse;
+    if (typeof op === "function") {
+      const hooked = function (text, reviver) {
+        const obj = op.call(win.JSON, text, reviver);
         try {
-          url = typeof arguments[0] === "string" ? arguments[0] : (arguments[0] && arguments[0].url) || "";
-        } catch (e) {}
-        const p = of.apply(this, arguments);
-        if (String(url).indexOf("/youtubei/v1/player") === -1) return p;
-        return p.then(function (res) {
-          try {
-            return res.clone().json().then(function (j) {
-              try { stats.fetch += prunePlayerResponse(j); } catch (e) { stats.err++; }
-              // ヘッダは元の応答のものをそのまま引き継ぐ(欠落がサイト側の判定を曲げないように)
-              return new ResCtor(JSON.stringify(j), {
-                status: res.status,
-                statusText: res.statusText,
-                headers: res.headers,
-              });
-            }).catch(function () { return res; });
-          } catch (e) { stats.err++; return res; }
-        });
+          if (obj && typeof obj === "object" && !Array.isArray(obj)
+            && (obj.adPlacements !== undefined || obj.playerAds !== undefined || obj.adSlots !== undefined)) {
+            stats.parse += prunePlayerResponse(obj);
+          }
+        } catch (e) { stats.err++; }
+        return obj;
       };
+      try { Object.defineProperty(hooked, "name", { value: "parse" }); } catch (e) {}
+      win.JSON.parse = hooked;
     }
   } catch (e) { stats.err++; }
 
-  // 2b) XHR 経路。polymer はこちらを使うことがある。
-  // 応答は読み取り専用アクセサなので、剥げた内容で実インスタンスに影(シャドウ)を
-  // 定義して差し替える。**影は次の open() で必ず落とす**——残したままだと使い回した
-  // XHR が古い応答を読み続け、クリック後のプレイヤー情報取得が腐って止まる
-  try {
-    const OO = XHR.prototype.open;
-    const OS = XHR.prototype.send;
-    XHR.prototype.open = function (m, u) {
-      try {
-        this.__mvUrl = String(u || "");
-        delete this.responseText;
-        delete this.response;
-      } catch (e) {}
-      return OO.apply(this, arguments);
-    };
-    XHR.prototype.send = function () {
-      const xhr = this;
-      try {
-        if (!xhr.__mvHooked && xhr.__mvUrl && xhr.__mvUrl.indexOf("/youtubei/v1/player") !== -1) {
-          xhr.__mvHooked = true; // リスナの二重登録を防ぐ(再利用時も1本)
-          xhr.addEventListener("readystatechange", function () {
-            try {
-              if (xhr.readyState !== 4) return;
-              if (!xhr.__mvUrl || xhr.__mvUrl.indexOf("/youtubei/v1/player") === -1) return;
-              let j = null;
-              if (xhr.responseType === "json") j = xhr.response;
-              else if (!xhr.responseType || xhr.responseType === "text") j = JSON.parse(xhr.responseText);
-              else return;
-              if (!j) return;
-              if (prunePlayerResponse(j) > 0) {
-                stats.xhr++;
-                const text = JSON.stringify(j);
-                Object.defineProperty(xhr, "responseText", { value: text, configurable: true });
-                Object.defineProperty(xhr, "response", {
-                  value: xhr.responseType === "json" ? j : text,
-                  configurable: true,
-                });
-              }
-            } catch (e) { stats.err++; }
-          });
-        }
-      } catch (e) {}
-      return OS.apply(this, arguments);
-    };
-  } catch (e) { stats.err++; }
+  // 3) XHR 経路はフックしない。テキスト応答ならページ側が JSON.parse で解くため 2) が
+  // 賄い、responseType:"json" の内部パースは届かないがその場合は後段(skipTick)へ委ねる。
+  // 応答オブジェクト/アクセサに触れるコードを持たないことが重要(過去に XHR の
+  // 実インスタンスへ影を定義して使い回し時に応答を腐らせた事故がある)
+  void XHR;
 
   return stats;
 }
@@ -122,5 +76,5 @@ if (typeof module !== "undefined" && module.exports && !(process.versions && pro
   module.exports = { installHooks: installHooks };
 } else {
   // Electron preload: 実環境へ差し込む
-  installHooks({ window: window, XMLHttpRequest: XMLHttpRequest, Response: Response });
+  installHooks({ window: window, XMLHttpRequest: XMLHttpRequest });
 }

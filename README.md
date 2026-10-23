@@ -10,7 +10,10 @@ npm install
 npm start        # 音楽プレイヤーとして起動
 npm test         # 純ロジックのユニットテスト(node --test)
 npm run probe    # 実走E2E(YouTube実サイトで再生/キュー/検索/広告ブロックを検証して終了)
+npm run dist     # Windows向けパッケージ(release/ へ NSISインストーラ+ポータブルexe)
 ```
+
+インストーラ(`musicview Setup x.y.z.exe`)とポータブル版(`musicview-x.y.z-portable.exe`)をリリースに同梱。パッケージ版の実行データ(セッション/フィルタキャッシュ等)は `%APPDATA%/musicview/data` 配下に置かれるため、ソース実行から移す場合は「取り込み」のやり直しが一度だけ必要。
 
 初回のログインは **「取り込み」ボタン**を使う: 普段の Firefox / Floorp で YouTube にログイン済みなら、そのセッション(必要最小限のクッキーだけ)をアプリに複製する。Electron から Google のログイン画面を開くと「安全ではないブラウザ」として拒否されるため、「ログイン」ボタンは補助(動く場合と動かない場合がある)。取り込んだセッションは永続 partition に保存され、次回以降は不要。
 

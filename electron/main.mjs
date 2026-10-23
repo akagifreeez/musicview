@@ -20,16 +20,18 @@ const require = createRequire(import.meta.url);
 const { AdblockEngine } = require("./adblock.cjs");
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const DATA_DIR = path.join(ROOT, "data");
-const SESSION_FILE = path.join(DATA_DIR, "session.json");
-const TITLES_FILE = path.join(DATA_DIR, "titles.json");
-const FILTERS_DIR = path.join(DATA_DIR, "filters");
 
 const argv = process.argv;
 // 本体起動中の検証用: userData を分離すればシングルロックに当たららず並行起動できる
 if (process.env.MUSICVIEW_USER_DATA) {
   app.setPath("userData", path.join(os.tmpdir(), process.env.MUSICVIEW_USER_DATA));
 }
+// 実行データ(session/filters/titles)の置き場。パッケージ時は ROOT が app.asar 内に
+// なるため書き込めず、userData 配下へ切り替える(迁移植行はしない=初回は取り込み直し)
+const DATA_DIR = app.isPackaged ? path.join(app.getPath("userData"), "data") : path.join(ROOT, "data");
+const SESSION_FILE = path.join(DATA_DIR, "session.json");
+const TITLES_FILE = path.join(DATA_DIR, "titles.json");
+const FILTERS_DIR = path.join(DATA_DIR, "filters");
 const IS_PROBE = argv.includes("--probe");
 // Cookie 取り込みの検証は本番パーティションに対して行う(そのままログイン済みになる)
 const IS_IMPORT_PROBE = argv.includes("--probe-import");

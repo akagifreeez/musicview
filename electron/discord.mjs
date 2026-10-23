@@ -129,8 +129,8 @@ export class DiscordPresence {
     if (a.startAt) activity.timestamps = { start: a.startAt };
     if (a.largeImage || a.largeText) {
       activity.assets = {};
-      // 外部URLは Discord のメディアプロキシ(mp:external)経由で渡す
-      if (a.largeImage) activity.assets.large_image = `mp:external/${a.largeImage}`;
+      // 外部URLはそのまま渡す(mp:external は署名が必要なため個人アプリでは使えない)
+      if (a.largeImage) activity.assets.large_image = a.largeImage;
       if (a.largeText) activity.assets.large_text = String(a.largeText).slice(0, 128);
     }
     if (a.type != null) activity.type = a.type; // 2 = LISTENING(〜を再生中)

@@ -754,15 +754,18 @@ async function pollOnce() {
   const pkey = `${snap.videoId}|${snap.state}|${snap.title}`;
   if (pkey !== lastPresenceKey && discordClient) {
     lastPresenceKey = pkey;
+    const presencePayload = {
+      largeImage: thumbUrl(snap.videoId),
+      largeText: snap.title || "musicview",
+      smallImage: "art",
+      smallText: "musicview",
+    };
     if (snap.state === 1 || snap.state === 3) {
       discordClient.update({
         details: snap.title || "YouTube",
         state: snap.author || "musicview",
         startAt: snap.state === 1 ? Date.now() - snap.time * 1000 : undefined,
-        largeImage: thumbUrl(snap.videoId),
-        largeText: snap.title || "musicview",
-        smallImage: "art",
-        smallText: "musicview",
+        ...presencePayload,
         type: 2, // LISTENING(〜を再生中)
         buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
       });
@@ -770,10 +773,7 @@ async function pollOnce() {
       discordClient.update({
         details: snap.title || "YouTube",
         state: "一時停止",
-        largeImage: thumbUrl(snap.videoId),
-        largeText: snap.title || "musicview",
-        smallImage: "art",
-        smallText: "musicview",
+        ...presencePayload,
         type: 2,
         buttons: [{ label: "YouTubeで開く", url: `https://www.youtube.com/watch?v=${snap.videoId}` }],
         force: true,
@@ -781,6 +781,7 @@ async function pollOnce() {
     } else {
       discordClient.clear();
     }
+    console.log(`musicview: presence large_image=${presencePayload.largeImage} small=${presencePayload.smallImage} type=${"2"} state=${snap.state}`);
   }
 
   // 現在曲の曲名はプレイヤーから直に取れる(oEmbed を待たずにキュー表示が埋まる)

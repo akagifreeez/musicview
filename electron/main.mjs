@@ -1206,6 +1206,22 @@ async function runProbe() {
     log("yt-prune stats:", pr);
   } catch (e) { log("yt-prune stats: err", e.message); }
 
+  // fetch ラッパが詰まらないこと(サイト画面で動画クリック時に読み込みが止まる回帰)。
+  // 実エンドポイントへの POST は YouTube 側の判断で 400 系になるが、約束が解決して
+  // 応答オブジェクトを受け取れればパイプは健全
+  try {
+    const fp = await Promise.race([
+      site.webContents.executeJavaScript(`(async function () {
+        try {
+          const r = await fetch("/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: "2.1" } } }) });
+          return "status:" + r.status;
+        } catch (e) { return "fetch-err:" + String(e && e.message).slice(0, 60); }
+      })()`),
+      new Promise(r => setTimeout(() => r("STUCK-8s"), 8000)),
+    ]);
+    log("fetch-pipe:", fp);
+  } catch (e) { log("fetch-pipe: err", e.message); }
+
   const recs = await extractRecs();
   log("watch recs:", recs.length, "first:", JSON.stringify(recs[0] ?? null));
 

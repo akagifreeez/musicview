@@ -91,7 +91,28 @@ export const SITE_BOOTSTRAP = `
   // グラフは window.__mvAudio に永続させる。createMediaElementSource は同じ要素に
   // 2回呼べず、再注入でクロージャを作り直すと例外でEQ/解析が死ぬため
   var audio = window.__mvAudio || null;
+  var audioEl = null;
+  // グラフの完全解体。動画要素が遷移で破壊される局面(ハード遷移/プレイヤー再構築)と
+  // 解析の読み取りが重なるとレンダラーごと落ちる(音声スレッドの競合→SIGSEGV)ため、
+  // 遷移の beforeunload と「要素がDOMから外れた」検知の両面で先に解体する
+  function hardTeardown() {
+    try {
+      if (audio) {
+        try { audio.an.disconnect(); } catch (e) {}
+        for (var i = audio.bands.length - 1; i >= 0; i--) { try { audio.bands[i].disconnect(); } catch (e) {} }
+        try { audio.src.disconnect(); } catch (e) {}
+        try { audio.ctx.close(); } catch (e) {}
+      }
+    } catch (e) {}
+    audio = null;
+    audioEl = null;
+    window.__mvAudio = null;
+  }
+  window.addEventListener("beforeunload", function () { hardTeardown(); });
   function ensureAudio() {
+    try {
+      if (audio && (!audioEl || !audioEl.isConnected)) hardTeardown(); // 要素交代(遷移)を検知
+    } catch (e) {}
     if (audio) return true;
     try {
       var v = document.querySelector("video.html5-main-video");
@@ -120,6 +141,12 @@ export const SITE_BOOTSTRAP = `
       audio = { ctx: ctx, bands: bands, an: an, buf: new Uint8Array(an.frequencyBinCount) };
       audioEl = v;
       window.__mvAudio = audio; // 診断・probe から参照できるように公開
+      window.__mvAudioEl = v;
+      // 再構築後もEQを引き継ぐ(遷移でグラフを作り直すとゲインが無効になるため)
+      var d = window.__mvEqDesired;
+      if (Array.isArray(d)) {
+        for (var k = 0; k < bands.length && k < d.length; k++) bands[k].gain.value = Number(d[k]) || 0;
+      }
       if (ctx.state === "suspended") { try { ctx.resume(); } catch (e) {} }
       return true;
     } catch (e) { return false; }
@@ -127,6 +154,7 @@ export const SITE_BOOTSTRAP = `
   function ctlEq(gains) {
     if (!ensureAudio() || !audio) return "no-audio";
     if (!Array.isArray(gains)) return "bad-args";
+    window.__mvEqDesired = gains.slice();
     for (var i = 0; i < audio.bands.length; i++) {
       var g = Number(gains[i]) || 0;
       audio.bands[i].gain.value = g;
@@ -134,6 +162,9 @@ export const SITE_BOOTSTRAP = `
     return "ok";
   }
   function ctlLevels(n) {
+    try {
+      if (audio && (!audioEl || !audioEl.isConnected)) { hardTeardown(); return null; }
+    } catch (e) {}
     if (!ensureAudio() || !audio) return null;
     n = Math.min(64, Math.max(4, Number(n) || 28));
     audio.an.getByteFrequencyData(audio.buf);

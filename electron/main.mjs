@@ -211,6 +211,21 @@ function makeYouTubeView() {
   wc.on("preload-error", (_e, preloadPath, error) => {
     console.error("musicview: yt preload-error", path.basename(preloadPath), error.message);
   });
+  // レンダラー/GPU の死は「画面が止まる」としてしか見えないので、原因追えるよう常時記録し、
+  // 主役が死んだ場合は同じURLを作り直して「読み込みが終わらないまま放置」を防ぐ
+  wc.on("render-process-gone", (_e, d) => {
+    console.error("musicview: yt renderer gone", JSON.stringify(d));
+    if (d && d.reason === "clean-exit") return;
+    setTimeout(() => {
+      try {
+        const u = wc.getURL();
+        if (u && u !== "about:blank" && !wc.isLoading() && !wc.isDestroyed()) {
+          console.log("musicview: renderer self-heal reload");
+          wc.loadURL(u);
+        }
+      } catch { /* 無視 */ }
+    }, 1500);
+  });
   wc.on("dom-ready", () => injectInto(wc));
   // 主役ビューの遷移だけ曲追跡をリセットする(退避ビューの遷移では触れない)
   wc.on("did-navigate", () => { if (v === site) lastVideoId = null; });
@@ -451,6 +466,7 @@ let desiredVol = 100;   // アプリ側が管理する音量/速度(遷移して
 let desiredRate = 1;
 let xfadeCooldownUntil = 0; // キャンセル直後の再開を抑える(シーク連打などでのチャーン防止)
 let playHistory = [];       // 「前の曲」用の再生履歴(あとから鳴った順・最大50)
+let pollFailSince = 0;      // pollが連続で無応答になってからの経過(レンダラー自己回復用)
 let vizPump = null;
 let eqGains = [0, 0, 0, 0, 0]; // 5バンドEQ(60Hz lowshelf が CLEAR BASS 相当)
 let vizOn = true;       // ビジュアライザー(解析値をUIへ送って描画)
@@ -598,8 +614,17 @@ async function tickXfade() {
   }
 
   // 待機ビューが広告中: スキップは skipTick に任せ、再生キックだけ続ける。
-  // 広告の進行中に読み直すと広告が最初からやり直しになり、待機が永久に終わらない
+  // 広告の進行中に読み直すと広告が最初からやり直しになり、待機が永久に終わらない。
+  // ただし広告から抜けられないまま固着した場合は打ち切って主役を直読み替えする
+  // (永久待ち=手動遷移の「読み込みが終わらない」の防止)
   if (st.ad) {
+    if (Date.now() - xfade.bornAt > 45000) {
+      console.log("musicview: xfade standby stuck on ad, hard fallback");
+      const url = xfade.url;
+      cancelXfade("standby stuck on ad");
+      site.webContents.loadURL(url);
+      return;
+    }
     if (Date.now() - xfade.lastKick > 800) {
       xfade.lastKick = Date.now();
       await execOn(xfadeView, `window.__mvCtl.cmd("play")`);
@@ -608,8 +633,15 @@ async function tickXfade() {
   }
 
   // 未開始: プレイヤーミュート+再生を蹴り続け(ミュートなら自動再生が必ず通り、
-  // 無音)、詰まっていたら読み直して再生開始をやり直す
+  // 無音)、詰まっていたら読み直して再生開始をやり直す。読み直しても45秒立つなら諦める
   if (st.state === -1 || st.state === 5) {
+    if (Date.now() - xfade.bornAt > 45000) {
+      console.log("musicview: xfade standby never started, hard fallback");
+      const url = xfade.url;
+      cancelXfade("standby never started");
+      site.webContents.loadURL(url);
+      return;
+    }
     if (Date.now() - xfade.lastKick > 800) {
       xfade.lastKick = Date.now();
       xfade.kicks++;
@@ -783,7 +815,24 @@ async function pollOnce() {
     await injectInto(site.webContents);
     snap = await execSite("window.__mvCtl ? window.__mvCtl.snap() : null");
   }
-  if (!snap || !snap.videoId) return { ok: false, mode, blocked: blockedCount };
+  if (!snap || !snap.videoId) {
+    // 応答がない状態が続くならレンダラーが固まっている。about:blank 駐車中を除き、
+    // 同じURLを作り直して自己回復させる(「読み込みが終わらないまま放置」の止め)
+    if (!pollFailSince) {
+      pollFailSince = Date.now();
+    } else if (Date.now() - pollFailSince > 15000 && !IS_ANY_PROBE) {
+      try {
+        const u = site.webContents.getURL();
+        if (u && u !== "about:blank" && !site.webContents.isLoading()) {
+          console.log("musicview: site unresponsive, self-heal reload");
+          site.webContents.loadURL(u);
+          pollFailSince = 0;
+        }
+      } catch { /* 無視 */ }
+    }
+    return { ok: false, mode, blocked: blockedCount };
+  }
+  pollFailSince = 0;
 
   if (snap.videoId !== lastVideoId) {
     if (lastVideoId && lastVideoId !== snap.videoId) {
@@ -1310,6 +1359,51 @@ async function runProbe() {
   } catch (e) { adProbe = "err:" + e.message; }
   log("adblock", adProbe, "blockedCount", blockedCount);
   for (const s of blockedSamples) log("blocked:", s);
+
+  // サイト画面からの動画選択(SPA遷移)の再現。/youtubei/v1/player の fetch 経路は
+  // mixロード(inline)やloadVideoById(プレイヤー内部)では通らないため、ここでだけ検証できる
+  {
+    const onConsole = (_e, level, message) => {
+      if (level >= 3) log("site-console-err:", String(message).slice(0, 200));
+    };
+    const onNav = (_e, url) => log("site-nav:", String(url).slice(0, 80));
+    site.webContents.on("console-message", onConsole);
+    site.webContents.on("did-navigate", onNav);
+    site.webContents.on("did-navigate-in-page", onNav);
+    try {
+      site.webContents.loadURL("https://www.youtube.com/");
+      await sleep(7000);
+      const clicked = await site.webContents.executeJavaScript(`(function () {
+        var cands = ["ytd-rich-item-renderer", "yt-lockup-view-model", "ytd-video-renderer", "a#video-title-link"];
+        for (var i = 0; i < cands.length; i++) {
+          var el = document.querySelector(cands[i]);
+          if (el) { el.click(); return cands[i]; }
+        }
+        return null;
+      })()`);
+      log("site-click:", JSON.stringify(clicked));
+      for (let i = 0; i < 8; i++) {
+        await sleep(2500);
+        const st = await site.webContents.executeJavaScript(`JSON.stringify((function () {
+          var s = window.__mvCtl ? (window.__mvCtl.snap() || {}) : {};
+          return {
+            href: location.href.slice(0, 90),
+            vid: s.videoId || null,
+            state: s.state ?? null,
+            ad: !!document.querySelector(".ad-showing"),
+            spinner: !!document.querySelector(".ytp-spinner, tp-yt-paper-spinner.active"),
+            prune: window.__mvPrune ? JSON.stringify(window.__mvPrune) : null
+          };
+        })())`);
+        log(`site-click t=${(i + 1) * 2.5}s:`, st);
+        const p = JSON.parse(st);
+        if (p.vid && p.state === 1 && !p.ad) { log("site-click PLAYING"); break; }
+      }
+    } catch (e) { log("site-click err:", e.message); }
+    site.webContents.removeListener("console-message", onConsole);
+    site.webContents.removeListener("did-navigate", onNav);
+    site.webContents.removeListener("did-navigate-in-page", onNav);
+  }
 
   setMode("music");
   await sleep(1200);

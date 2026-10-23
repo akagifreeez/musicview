@@ -122,11 +122,14 @@ body:not(.has-art) #ambient { opacity: 0.5; }
 #search::placeholder { color: var(--label-tertiary); }
 #search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
-/* 演奏操作(モノクロ・中央配置) */
+/* 演奏操作(モノクロ・中央配置)。
+   tb-left/tb-right より手前に固定(positioned 兄弟の後勝ち描画でクリックを
+   奪われる事故 — next ボタンが tb-right の箱の下に入る — の防止) */
 .transport {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: 16px;

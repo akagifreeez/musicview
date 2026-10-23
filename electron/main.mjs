@@ -1310,6 +1310,22 @@ async function runProbe() {
   await sleep(1200);
   await probeShot(win.webContents, path.join(DATA_DIR, "probe", "probe-music.png"));
 
+  // UIヒットテスト: 演奏ボタンの中心に別要素が重なってクリックを奪っていないか
+  // (「ボタンが触れなくなる」事故の検出用)
+  try {
+    const hit = await win.webContents.executeJavaScript(`(function () {
+      return ["prev", "pp", "next", "eq-btn"].map(function (id) {
+        const b = document.getElementById(id);
+        if (!b) return { id: id, missing: true };
+        const r = b.getBoundingClientRect();
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        const name = top ? (top.id || (top.tagName || "?") + "." + String(top.className && top.className.baseVal !== undefined ? top.className.baseVal : top.className || "").slice(0, 40)) : "none";
+        return { id: id, top: name, covered: top !== b && !(b.contains(top)) };
+      });
+    })()`);
+    log("hit-test:", JSON.stringify(hit));
+  } catch (e) { log("hit-test err:", e.message); }
+
   // EQボタンの新挙動(E2E): クリック=ON/OFF(赤化)・右クリック=パネル。
   // プリセット適用→ボタンが赤くなる→パネルの折り返し含めてスクショで確認
   try {

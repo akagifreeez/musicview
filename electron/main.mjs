@@ -1265,7 +1265,10 @@ async function runProbe() {
     const fp = await Promise.race([
       site.webContents.executeJavaScript(`(async function () {
         try {
-          const r = await fetch("/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: "2.1" } } }) });
+          // キー無しで叩く(YouTube が 400 を返してもパイプの健全性確認としては十分)。
+          // Innertube の公開ウェブキーをソースに書くと GitHub のシークレットスキャンに
+          // 引っかかるため定数は持ち込まない
+          const r = await fetch("/youtubei/v1/player", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: "2.1" } } }) });
           return "status:" + r.status;
         } catch (e) { return "fetch-err:" + String(e && e.message).slice(0, 60); }
       })()`),

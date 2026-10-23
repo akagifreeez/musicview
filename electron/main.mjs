@@ -194,6 +194,20 @@ function installAdblock(ses) {
 }
 
 // ── サイトビュー ────────────────────────────────
+// F12 / Ctrl+Shift+I でそのビューの DevTools を開閉する(ページ側の調査用)。
+// WebContentsView は分割表示できないため別窓(detach)で開く
+function attachDevtoolsToggle(wc) {
+  wc.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    const isF12 = input.key === "F12";
+    const isCtrlShiftI = input.control && input.shift && !input.alt && input.key.toLowerCase() === "i";
+    if (!isF12 && !isCtrlShiftI) return;
+    event.preventDefault();
+    if (wc.isDevToolsOpened()) wc.closeDevTools();
+    else wc.openDevTools({ mode: "detach" });
+  });
+}
+
 // youtube.com を載せるビューの共通工場。主役(視聴)・検索・クロスフェード退避の
 // 3 用途で同じ配線(注入/広告スキップ/Ctrl+M/新窓処理)を使い回す
 function makeYouTubeView() {
@@ -253,6 +267,7 @@ function makeYouTubeView() {
       setMode(mode === "music" ? "site" : "music");
     }
   });
+  attachDevtoolsToggle(wc);
   // 新窓要求はアプリ内で受ける(youtube 以外は開かない)
   wc.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\/(www\.)?youtube\.com\//.test(url)) wc.loadURL(url);
@@ -302,6 +317,7 @@ function ensureBrowse() {
     },
   });
   browse.setBackgroundColor("#0f0f0f");
+  attachDevtoolsToggle(browse.webContents);
   if (win) {
     win.contentView.addChildView(browse);
     browse.setVisible(false);
@@ -1215,6 +1231,17 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(ROOT, "renderer", "index.html"));
+  // アプリUI自体の調査用(音楽モード中にフォーカスがある側)。ドック表示で開く
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    const isF12 = input.key === "F12";
+    const isCtrlShiftI = input.control && input.shift && !input.alt && input.key.toLowerCase() === "i";
+    if (!isF12 && !isCtrlShiftI) return;
+    event.preventDefault();
+    const wwc = win.webContents;
+    if (wwc.isDevToolsOpened()) wwc.closeDevTools();
+    else wwc.openDevTools();
+  });
   // preload や renderer の初動エラーは静かに死ぬと原因が見えないので、常にログへ出す
   win.webContents.on("preload-error", (_e, preloadPath, error) => {
     console.error("musicview: preload-error", path.basename(preloadPath), error.message);
@@ -1471,6 +1498,16 @@ async function runProbe() {
     );
     log("eq-toggle off:", eqOff ? "OK" : "NG");
   } catch (e) { log("eq-toggle err:", e.message); }
+
+  // F12 配線の確認: アプリUI側にキー入力を送り DevTools が開くか(サイト側ビューも
+  // 同じ attachDevtoolsToggle を共有する)
+  try {
+    win.webContents.sendInputEvent({ type: "keyDown", keyCode: "F12" });
+    await sleep(900);
+    const opened = win.webContents.isDevToolsOpened();
+    log("f12:", opened ? "OPEN-OK" : "NOT-OPENED");
+    if (opened) win.webContents.closeDevTools();
+  } catch (e) { log("f12 err:", e.message); }
 
   setMode("site");
   await sleep(1500);

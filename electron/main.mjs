@@ -273,12 +273,14 @@ function makeYouTubeView() {
   wc.on("did-navigate", () => {
     if (v === site) {
       lastVideoId = null;
+      lastSiteNavAt = Date.now();
       if (xfade) cancelXfade("user navigation");
     }
   });
   wc.on("did-navigate-in-page", () => {
     if (v === site) {
       lastVideoId = null;
+      lastSiteNavAt = Date.now();
       if (xfade) cancelXfade("user in-page navigation");
     }
   });
@@ -526,6 +528,10 @@ let desiredRate = 1;
 let xfadeCooldownUntil = 0; // キャンセル直後の再開を抑える(シーク連打などでのチャーン防止)
 let playHistory = [];       // 「前の曲」用の再生履歴(あとから鳴った順・最大50)
 let pollFailSince = 0;      // pollが連続で無応答になってからの経過(レンダラー自己回復用)
+let lastSiteNavAt = 0;      // サイトビューで遷移が起きた時刻(遷移直後の再生キック用)
+let lastNavKickAt = 0;
+let watchLastTime = -1;     // 再生位置の停滞監視用(15秒停滞でストリーム取り直し)
+let watchStallSince = 0;
 let vizPump = null;
 let eqGains = [0, 0, 0, 0, 0]; // 5バンドEQ(60Hz lowshelf が CLEAR BASS 相当)
 let vizOn = true;       // ビジュアライザー(解析値をUIへ送って描画)
@@ -914,6 +920,46 @@ async function pollOnce() {
     await execCmd("vol", desiredVol);
   }
 
+  // ユーザーが画面内遷移した直後は「遷移先を再生」が目的。旧曲を一時停止した状態で
+  // クリックすると新動画が停止のまま張り付く(実走で確認)ため、遷移後60秒以内は
+  // 停止を検知したら play に戻す。旧曲の一時停止位置は判定に使えない(114秒等が
+  // 入るため)ので state のみを見る。ユーザーの停止操作から5秒は尊重
+  if (lastSiteNavAt && Date.now() - lastSiteNavAt < 60000 && snap.state === 2
+    && Date.now() - userPauseAt > 5000) {
+    if (Date.now() - lastNavKickAt > 5000) {
+      lastNavKickAt = Date.now();
+      console.log("musicview: post-nav play kick (paused after navigation)");
+      await execCmd("play");
+    }
+  }
+
+  // 再生/バッファ中に位置が15秒停滞 = SABR初手ストリームの空振り(メインブラウザの
+  // Floorpでも同一現象を確認・F5で2.9秒回復)。同じURLを作り直してストリームを
+  // 取り直すのがF5相当の自己回復。一時停止(2)は停滞が正常なので対象外
+  if (snap.state === 1 || snap.state === 3) {
+    const t = Number(snap.time) || 0;
+    if (Math.abs(t - watchLastTime) < 0.5) {
+      if (!watchStallSince) watchStallSince = Date.now();
+      else if (Date.now() - watchStallSince > 15000 && !IS_ANY_PROBE) {
+        try {
+          const u = site.webContents.getURL();
+          if (u && u !== "about:blank" && !site.webContents.isLoading()) {
+            console.log("musicview: playback frozen 15s, stream re-acquire reload");
+            watchStallSince = Date.now();
+            watchLastTime = t;
+            site.webContents.loadURL(u);
+          }
+        } catch { /* 無視 */ }
+      }
+    } else {
+      watchStallSince = 0;
+      watchLastTime = t;
+    }
+  } else {
+    watchStallSince = 0;
+    watchLastTime = -1;
+  }
+
   // Discord Rich Presence(曲/再生状態が変わったときだけ送る)
   // 画像: 大=再生中動画のサムネイル(外部直接リンク)、小=アプリのロゴアセット("art")
   const pkey = `${snap.videoId}|${snap.state}|${snap.title}`;
@@ -1254,6 +1300,9 @@ function createWindow() {
       preload: path.join(ROOT, "electron", "preload.cjs"),
       contextIsolation: true,
       sandbox: true,
+      // サイト表示中はこの窓がサイトビューに覆われ「オクルード」扱いになる。
+      // ここが間引かれると500msポーリング(自己回復/再生キック)が止まるため無効化
+      backgroundThrottling: false,
     },
   });
   win.loadFile(path.join(ROOT, "renderer", "index.html"));
@@ -1660,6 +1709,11 @@ async function runProbeSpa() {
   ]);
 
   let stalls = 0, okays = 0;
+  // ユーザーフロー再現: 旧曲を一時停止した状態でサムネをクリックする
+  // (この状態だと新動画が停止のまま張り付くのが本来の事故。post-nav kick の検証)
+  await execCmd("pause");
+  log("old video paused (user flow 再現)");
+  await sleep(1500);
   for (let r = 1; r <= 6; r++) {
     const pick = await wc.executeJavaScript(`(function () {
       try {
@@ -1690,8 +1744,14 @@ async function runProbeSpa() {
       var v = el.getAttribute("content-id") || el.getAttribute("contentId") || null;
       if (!v) {
         try {
-          var m = (el.innerHTML || "").match(/\/vi\/([a-zA-Z0-9_-]{11})\//);
-          if (m && m[1]) v = m[1];
+          // innerHTML から "/vi/<ID>/hqdefault.jpg" の ID を拾う(正規表現は
+          // テンプレートリテラルのエスケープ(\v等)で壊れるため使わない)
+          var html = el.innerHTML || "";
+          var k = html.indexOf("/vi/");
+          if (k !== -1) {
+            var cand = html.substring(k + 4, k + 15);
+            if (/^[a-zA-Z0-9_-]{11}$/.test(cand)) v = cand;
+          }
         } catch (e) {}
       }
       if (!v) {

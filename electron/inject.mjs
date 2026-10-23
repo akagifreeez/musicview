@@ -244,6 +244,8 @@ export const VISIBILITY_PATCH = `
   try {
     Object.defineProperty(document, "hidden", { get: function () { return false; }, configurable: true });
     Object.defineProperty(document, "visibilityState", { get: function () { return "visible"; }, configurable: true });
+    // 背景判定(hasFocus)も YouTube は自動一時停止に使うため偽装する
+    try { document.hasFocus = function () { return true; }; } catch (e) {}
     Object.defineProperty(document, "webkitHidden", { get: function () { return false; }, configurable: true });
     Object.defineProperty(document, "webkitVisibilityState", { get: function () { return "visible"; }, configurable: true });
   } catch (e) {}

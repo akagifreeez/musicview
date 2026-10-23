@@ -920,17 +920,23 @@ async function pollOnce() {
     await execCmd("vol", desiredVol);
   }
 
-  // ユーザーが画面内遷移した直後は「遷移先を再生」が目的。旧曲を一時停止した状態で
-  // クリックすると新動画が停止のまま張り付く(実走で確認)ため、遷移後60秒以内は
-  // 停止を検知したら play に戻す。旧曲の一時停止位置は判定に使えない(114秒等が
-  // 入るため)ので state のみを見る。ユーザーの停止操作から5秒は尊重
-  if (lastSiteNavAt && Date.now() - lastSiteNavAt < 60000 && snap.state === 2
-    && Date.now() - userPauseAt > 5000) {
-    if (Date.now() - lastNavKickAt > 5000) {
-      lastNavKickAt = Date.now();
-      console.log("musicview: post-nav play kick (paused after navigation)");
-      await execCmd("play");
-    }
+  // ユーザーが画面内遷移した直後は「遷移先を再生」が目的。YouTubeのSPA交換は
+  // 旧曲の状態次第で発火しないことがあり(一時停止中のクリックで新動画が永久に
+  // cueされない/再生中のクリックでは旧曲の終了まで遅延する実走確認)、待っていても
+  // 来ないため、URLの動画IDとプレイヤーが食い違っていたら loadVideoById で強制投入
+  // する(shuffle/回復と同じ確実な経路)
+  if (lastSiteNavAt && Date.now() - lastSiteNavAt < 90000) {
+    try {
+      const uv = new URL(site.webContents.getURL()).searchParams.get("v");
+      if (uv && /^[a-zA-Z0-9_-]{11}$/.test(uv) && uv !== snap.videoId) {
+        if (Date.now() - lastNavKickAt > 4000) {
+          lastNavKickAt = Date.now();
+          console.log("musicview: post-nav force load", uv, "(player stuck on", snap.videoId + ")");
+          await execCmd("load", uv);
+          if (snap.state === 2) await execCmd("play");
+        }
+      }
+    } catch { /* URL取得失敗は無視 */ }
   }
 
   // 再生/バッファ中に位置が15秒停滞 = SABR初手ストリームの空振り(メインブラウザの

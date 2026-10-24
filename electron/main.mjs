@@ -960,9 +960,13 @@ async function pollOnce() {
         if (Date.now() - lastNavKickAt > 4000) {
           lastNavKickAt = Date.now();
           const list = new URL(site.webContents.getURL()).searchParams.get("list");
-          if (list && /^(RD|PL|OL|UL|FL|LL)/.test(list)) {
-            // list を再接続した形で投入(loadVideoById 単体だとプレイリストが切り
-            // 離され、曲末の自動進行が死ぬ=次の曲へ進まなくなる)
+          // ページが骨格(ポリマー起動失敗)か健全かで分岐。骨格のままメディアだけ
+          // 交換すると、キューUI/次の曲データが成立せず「取り残される」
+          const pageOk = await execSite("!!document.querySelector(\"ytd-watch-flexy, ytd-rich-item-renderer, yt-lockup-view-model\")").catch(() => null);
+          if (pageOk !== true) {
+            console.log("musicview: post-nav on broken page, full re-load", uv);
+            site.webContents.loadURL(site.webContents.getURL());
+          } else if (list && /^(RD|PL|OL|UL|FL|LL)/.test(list)) {
             console.log("musicview: post-nav force load", uv, "with list", list.slice(0, 24));
             await execCmd("loadlist", { videoId: uv, list });
           } else {

@@ -1668,6 +1668,12 @@ async function runProbe() {
     await sleep(400);
     await execCmd("play");
     log("pause-play cmd: OK");
+    for (let vi = 0; vi < 5; vi++) {
+      await sleep(3000);
+      const lv = await execSite("JSON.stringify({ lv: window.__mvCtl ? window.__mvCtl.levels(28) : null, dis: window.__mvAudioDisabled === true, has: !!window.__mvAudio, ready: window.__mvPageReady === true, paused: (function(){var v=document.querySelector('video.html5-main-video');return v?v.paused:null;})(), ct: (function(){var v=document.querySelector('video.html5-main-video');return v?Math.round(v.currentTime*10)/10:null;})(), fails: window.__mvAudioFails === undefined ? null : window.__mvAudioFails })").catch(() => "?");
+      log("viz levels:", String(lv).slice(0, 230));
+      if (String(lv).indexOf("null") === -1 && vi >= 2) break;
+    }
   } catch (e) { log("pause-play err:", e.message); }
 
   setMode("site");

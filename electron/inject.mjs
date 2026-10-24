@@ -151,6 +151,7 @@ export const SITE_BOOTSTRAP = `
     audio = null;
     audioEl = null;
     window.__mvAudio = null;
+    try { window.__mvAudioFails = audioFails; } catch (e) {}
   }
   window.addEventListener("beforeunload", function () { hardTeardown(); });
   // ページが安定した合図(YouTube自身の遷移完了イベント)を待つゲート。
@@ -161,6 +162,7 @@ export const SITE_BOOTSTRAP = `
   } catch (e) {}
   setTimeout(function () { window.__mvPageReady = true; }, 12000); // 発火しないページ向けの代替
   function ensureAudio() {
+  try { window.__mvAudioFails = audioFails; } catch (e) {}
     if (window.__mvAudioDisabled) return false;
     var v = null;
     try {
@@ -210,7 +212,9 @@ export const SITE_BOOTSTRAP = `
       }
       var an = ctx.createAnalyser();
       an.fftSize = 256;
-      an.smoothingTimeConstant = 0.70; // 躍動感優先(潰れた波形にならないようやや低め)
+      an.smoothingTimeConstant = 0.60; // 躍動感優先(潰れた波形にならないようやや低め)
+      an.minDecibels = -85;
+      an.maxDecibels = -20;
       node.connect(an);
       an.connect(ctx.destination);
       audio = { ctx: ctx, bands: bands, an: an, buf: new Uint8Array(an.frequencyBinCount) };
@@ -249,6 +253,24 @@ export const SITE_BOOTSTRAP = `
     }
     return "ok";
   }
+  // 対数周波数バンド計算(純関数)。30Hz〜16kHz を対数分布で n 分割し、
+  // 帯域内ピーク×高域リフトを返す。線形割り当てだと右半分が 10〜24kHz 域に
+  // なって音楽では常時無音=高音部分が動かない(ユーザー報告の修正)
+  function vizBands(buf, bins, nyquist, n) {
+    var fMin = 30, fMax = Math.min(16000, nyquist);
+    var out = [];
+    for (var i = 0; i < n; i++) {
+      var f0 = fMin * Math.pow(fMax / fMin, i / n);
+      var f1 = fMin * Math.pow(fMax / fMin, (i + 1) / n);
+      var b0 = Math.min(bins - 1, Math.floor((f0 / nyquist) * bins));
+      var b1 = Math.min(bins, Math.max(b0 + 1, Math.ceil((f1 / nyquist) * bins)));
+      var mx = 0;
+      for (var j = b0; j < b1; j++) { if (buf[j] > mx) mx = buf[j]; }
+      var lift = 1 + (i / n) * 1.2;
+      out.push(Math.min(100, Math.round((mx * lift) * 100 / 255)));
+    }
+    return out;
+  }
   function ctlLevels(n) {
     try {
       if (audio && (!audioEl || !audioEl.isConnected)) { hardTeardown(); return null; }
@@ -258,20 +280,11 @@ export const SITE_BOOTSTRAP = `
     try {
       audio.an.getByteFrequencyData(audio.buf);
     } catch (e) {
-      // AudioContext が音声デバイス/レンダラーのエラー状態のとき毎周期ここに来る。
-      // 3回続いたら解体して諦める(エラーフラッドと要素音の掠め取りを止める)
       if (++audioFails >= 3) { hardTeardown(); window.__mvAudioDisabled = true; }
       return null;
     }
     audioFails = 0;
-    var out = [], per = Math.floor(audio.buf.length / n);
-    for (var i = 0; i < n; i++) {
-      var sum = 0;
-      for (var j = 0; j < per; j++) sum += audio.buf[i * per + j];
-      var v = Math.round((sum / per) * 100 / 255 * (1 + (i / n) * 0.9));
-      out.push(Math.min(100, v));
-    }
-    return out;
+    return vizBands(audio.buf, audio.buf.length, (audio.ctx.sampleRate || 48000) / 2, n);
   }
   if (window.__mvCtl) { window.__mvCtl.snap = snap; window.__mvCtl.cmd = cmd; window.__mvCtl.skipTick = skipTick; window.__mvCtl.levels = ctlLevels; return; }
   window.__mvCtl = { snap: snap, cmd: cmd, skipTick: skipTick, levels: ctlLevels };

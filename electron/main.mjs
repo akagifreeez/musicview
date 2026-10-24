@@ -539,6 +539,10 @@ let xfadeCooldownUntil = 0; // キャンセル直後の再開を抑える(シー
 let playHistory = [];       // 「前の曲」用の再生履歴(あとから鳴った順・最大50)
 let pollFailSince = 0;      // pollが連続で無応答になってからの経過(レンダラー自己回復用)
 let lastSiteNavAt = 0;      // サイトビューで遷移が起きた時刻(遷移直後の再生キック用)
+
+let userPauseAt = 0;        // ユーザー自身の一時停止操作の時刻
+
+let sleepPauseAt = 0;       // スリープタイマーによる一時停止の時刻
 let lastNavKickAt = 0;
 let watchLastTime = -1;     // 再生位置の停滞監視用(15秒停滞でストリーム取り直し)
 let watchStallSince = 0;
@@ -1599,6 +1603,14 @@ async function runProbe() {
     log("f12:", opened ? "OPEN-OK" : "NOT-OPENED");
     if (opened) win.webContents.closeDevTools();
   } catch (e) { log("f12 err:", e.message); }
+
+  // mv:cmd pause/play の健全性(ハンドラ内の未定義変数等の実行時エラーを検出)
+  try {
+    await execCmd("pause");
+    await sleep(400);
+    await execCmd("play");
+    log("pause-play cmd: OK");
+  } catch (e) { log("pause-play err:", e.message); }
 
   setMode("site");
   await sleep(1500);

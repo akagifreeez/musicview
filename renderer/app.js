@@ -15,6 +15,7 @@ const els = {
   eqBtn: $("eq-btn"), eqPanel: $("eq-panel"), eqClose: $("eq-close"), eqSliders: $("eq-sliders"),
   dcBtn: $("dc-btn"), dcPanel: $("dc-panel"), dcClose: $("dc-close"), dcId: $("dc-id"),
   dcSave: $("dc-save"), dcStatus: $("dc-status"),
+  diag: $("diag"),
   loop: $("loop"), shuffle: $("shuffle"), mix: $("mix"),
   tabQueue: $("tab-queue"), tabRecs: $("tab-recs"),
   recsKind: $("recs-kind"), recsBody: $("recs-body"),
@@ -487,6 +488,20 @@ els.dcSave.addEventListener("click", async () => {
   els.dcStatus.textContent = r.saved
     ? "保存しました(Discord起動中なら数秒で反映)"
     : "IDを消去しました";
+});
+
+// 診断レポートの書き出し(不具合報告の材料。保存先を選んでテキスト保存)
+els.diag.addEventListener("click", async () => {
+  const btn = els.diag;
+  btn.disabled = true;
+  btn.textContent = "生成中…";
+  try {
+    const r = await window.musicview.saveDiagReport();
+    btn.textContent = r?.ok ? "書き出し✓" : (r?.canceled ? "キャンセル" : "失敗");
+  } catch {
+    btn.textContent = "失敗";
+  }
+  setTimeout(() => { btn.textContent = "診断"; btn.disabled = false; }, 4000);
 });
 
 // ── モード ────────────────────────────────────

@@ -1,7 +1,7 @@
 // musicview — YouTube 動画を音楽として聴くことに特化したプレイヤー
 // 実サイト(youtube.com)を WebContentsView で包み、音楽向けの操作面を上に重ねる。
 // 広告は webRequest(EasyList エンジン)+ プレイヤー内スキップ + CSS 隠しの 3 段構え
-import { app, BrowserWindow, WebContentsView, ipcMain, globalShortcut, session, contentTracing, net } from "electron";
+import { app, BrowserWindow, WebContentsView, ipcMain, globalShortcut, session, contentTracing, net, dialog, shell } from "electron";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +15,8 @@ import { clampGains, isFlat } from "../lib/eq.mjs";
 import { SITE_BOOTSTRAP, EXTRACT_ITEMS, AD_HIDE_CSS, VISIBILITY_PATCH } from "./inject.mjs";
 import { importYoutubeCookies } from "./browser-import.mjs";
 import { DiscordPresence } from "./discord.mjs";
+import { createRecoveryState, stepRecovery, needsPageCheck, recordEvent, RECOVERY_KIND_JA } from "../lib/recovery.mjs";
+import { makeProbes } from "./probes.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -88,13 +90,14 @@ let shuffleOrder = null;
 let blockedCount = 0;
 const blockedSamples = []; // 切り分け用: 直近のブロック/リダイレクトURL
 let recsTimer = null;
-let playKickAt = 0;
-let unstartedSince = 0;     // 広告詰まり等で unstarted が続いたときの自己回復用
-let recoveryKey = null;
-let recoveryTries = 0;
-let weMutedForRecovery = false; // ミュート再生で始動したあと解除するためのフラグ
 let lastQueueIds = null;    // プレイリストパネルから取ったキュー(getPlaylist が null のときの代役)
 let bootHasSession = false; // 起動時にセッション Cookie があるか(無いなら youtube を自動ロードしない)
+
+// 再生異常の監視状態と回復履歴。判定そのものは lib/recovery.mjs の
+// stepRecovery(純関数)が担い、ここは状態の器とアクションの実行だけを持つ
+const rec = createRecoveryState();
+let bootAt = 0;             // 起動時刻(診断レポート用)
+const RECOVERY_LOG = (...a) => console.log("musicview:", ...a);
 
 // 曲名キャッシュ(キュー表示用)。oEmbed で解決し data/titles.json に永続化
 const titles = new Map();
@@ -258,6 +261,7 @@ function makeYouTubeView() {
       if (msg === lastMsg && now - lastMsgAt < 10000) return;
       lastMsg = msg;
       lastMsgAt = now;
+      noteDiagConsole("site", msg);
       console.error("musicview: yt console:", msg.slice(0, 180));
     }
   });
@@ -286,13 +290,14 @@ function makeYouTubeView() {
         const ok = await wc.executeJavaScript(
           '!!document.querySelector("ytd-watch-flexy, ytd-rich-item-renderer, yt-lockup-view-model, ytd-browse, ytd-search, ytd-video-renderer") || (document.body && document.body.innerText.length > 40)',        );
         if (ok) {
-          skeletonReloads.delete(wc.id);
+          rec.skeletonReloads.delete(wc.id);
           return;
         }
-        const n = skeletonReloads.get(wc.id) || 0;
+        const n = rec.skeletonReloads.get(wc.id) || 0;
         if (n < 2 && !wc.isLoading()) {
-          skeletonReloads.set(wc.id, n + 1);
-          console.log("musicview: skeletal page, auto-reload", n + 1);
+          rec.skeletonReloads.set(wc.id, n + 1);
+          recordEvent(rec, Date.now(), "skeleton-reload", 2, `view=${wc.id} try${n + 1}`);
+          RECOVERY_LOG("skeletal page, auto-reload", n + 1);
           wc.reload();
         }
       } catch { /* 無視 */ }
@@ -304,14 +309,14 @@ function makeYouTubeView() {
   wc.on("did-navigate", () => {
     if (v === site) {
       lastVideoId = null;
-      lastSiteNavAt = Date.now();
+      rec.navAt = Date.now();
       if (xfade) cancelXfade("user navigation");
     }
   });
   wc.on("did-navigate-in-page", () => {
     if (v === site) {
       lastVideoId = null;
-      lastSiteNavAt = Date.now();
+      rec.navAt = Date.now();
       if (xfade) cancelXfade("user in-page navigation");
     }
   });
@@ -558,17 +563,10 @@ let desiredVol = 100;   // アプリ側が管理する音量/速度(遷移して
 let desiredRate = 1;
 let xfadeCooldownUntil = 0; // キャンセル直後の再開を抑える(シーク連打などでのチャーン防止)
 let playHistory = [];       // 「前の曲」用の再生履歴(あとから鳴った順・最大50)
-let pollFailSince = 0;      // pollが連続で無応答になってからの経過(レンダラー自己回復用)
-let lastSiteNavAt = 0;      // サイトビューで遷移が起きた時刻(遷移直後の再生キック用)
 
 let userPauseAt = 0;        // ユーザー自身の一時停止操作の時刻
 
 let sleepPauseAt = 0;       // スリープタイマーによる一時停止の時刻
-let lastNavKickAt = 0;
-let watchLastTime = -1;     // 再生位置の停滞監視用(15秒停滞でストリーム取り直し)
-let watchStallSince = 0;
-let watchStallCount = 0;   // 連続停滞回数(同動画2回でページ再取得に格上げ)
-const skeletonReloads = new Map(); // 骨格ページ自動リロードの回数(ビューごと)
 let vizPump = null;
 let eqGains = [0, 0, 0, 0, 0]; // 5バンドEQ(60Hz lowshelf が CLEAR BASS 相当)
 let vizOn = true;       // ビジュアライザー(解析値をUIへ送って描画)
@@ -680,7 +678,8 @@ async function tickXfade() {
 
   if (!xfade) {
     // 新規開始は主役が再生中のときだけ。
-    // 深シークでフェード窓を飛ばされて曲が終わった場合は、ハードカットで次曲へ進む
+    // 深シークでフェード窓を飛ばされて曲が終わった場合は、ハードカットで次曲へ進む。
+    // この進行はクロスフェード専用パスなので回復判定器(stepRecovery)の対象外
     if (s.snap.state !== 1 || s.snap.ad || s.snap.dur < 30) {
       if (s.snap.state === 0 && Date.now() > xfadeCooldownUntil) {
         const nextId = queueNextId(s.snap);
@@ -909,7 +908,88 @@ async function finalizeXfade() {
   console.log("musicview: xfade done, swapped to", site?.webContents?.getURL?.().slice(0, 60));
 }
 
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
 // ── スナップショット(poll の実体)──────────────
+function safeSiteUrl() {
+  try { return site.webContents.getURL(); } catch { return null; }
+}
+function siteLoading() {
+  try { return site.webContents.isLoading(); } catch { return false; }
+}
+function siteMuted() {
+  try { return site.webContents.isAudioMuted(); } catch { return false; }
+}
+
+// 回復判定器(stepRecovery)が返したアクションを順に実行する。
+// 判定と副作用を分けているので、ここに分岐の知識は無い(しきい値は lib/recovery.mjs)
+async function runRecoveryActions(actions) {
+  for (const a of actions) {
+    switch (a.kind) {
+      case "recovery-unmute":
+        RECOVERY_LOG("recovery unmute");
+        await execCmd("unmute");
+        await execCmd("vol", desiredVol);
+        break;
+      case "unmute-main":
+        try {
+          site.webContents.setAudioMuted(false);
+          RECOVERY_LOG("main view was muted, unmuted");
+        } catch { /* 無視 */ }
+        break;
+      case "play-kick":
+      case "nav-play":
+        await execCmd("play");
+        break;
+      case "self-heal-reload":
+        RECOVERY_LOG("site unresponsive, self-heal reload");
+        try { site.webContents.loadURL(a.url); } catch { /* 無視 */ }
+        break;
+      case "nav-full-reload":
+        RECOVERY_LOG("post-nav on broken page, full re-load", String(a.url ?? "").slice(0, 60));
+        try { site.webContents.loadURL(a.url); } catch { /* 無視 */ }
+        break;
+      case "nav-force-loadlist":
+        RECOVERY_LOG("post-nav force load", a.videoId, "with list", String(a.list).slice(0, 24));
+        await execCmd("loadlist", { videoId: a.videoId, list: a.list });
+        break;
+      case "nav-force-load":
+        RECOVERY_LOG("post-nav force load", a.videoId, "(player stuck)");
+        await execCmd("load", a.videoId);
+        break;
+      case "unstarted-mute-play":
+        RECOVERY_LOG("recovery mute-play");
+        await execSite(`(function(){var p=document.getElementById("movie_player");if(!p)return;try{p.mute();p.playVideo();}catch(e){}})()`);
+        break;
+      case "unstarted-load":
+        await execCmd("load", a.videoId);
+        break;
+      case "stall-reacquire":
+        RECOVERY_LOG("playback frozen 15s, re-acquire stream", a.videoId, "@", Math.round(a.seekTo), "try", a.tryN);
+        // 位置を保持したままストリームを取り直し、停滞位置から再生し直す
+        execCmd("load", a.videoId).catch(() => {}).then(async () => {
+          await sleep(1500);
+          await execCmd("seek", a.seekTo).catch(() => {});
+          await execCmd("play").catch(() => {});
+        });
+        break;
+      case "stall-page-reload":
+        RECOVERY_LOG("playback frozen after retries, page re-acquire");
+        try { site.webContents.loadURL(a.url); } catch { /* 無視 */ }
+        break;
+      case "end-advance":
+        RECOVERY_LOG("end-of-track advance ->", a.videoId, a.queued ? "(queue)" : "(radio fallback)");
+        try {
+          site.webContents.loadURL(mixUrl(a.videoId));
+          rec.navAt = Date.now();
+        } catch { /* 無視 */ }
+        break;
+      default:
+        RECOVERY_LOG("unknown recovery action", a.kind);
+    }
+  }
+}
+
 async function pollOnce() {
   if (!site) return { ok: false, mode, blocked: blockedCount };
   let snap = await execSite("window.__mvCtl ? window.__mvCtl.snap() : null");
@@ -920,21 +1000,12 @@ async function pollOnce() {
   if (!snap || !snap.videoId) {
     // 応答がない状態が続くならレンダラーが固まっている。about:blank 駐車中を除き、
     // 同じURLを作り直して自己回復させる(「読み込みが終わらないまま放置」の止め)
-    if (!pollFailSince) {
-      pollFailSince = Date.now();
-    } else if (Date.now() - pollFailSince > 15000 && !IS_ANY_PROBE) {
-      try {
-        const u = site.webContents.getURL();
-        if (u && u !== "about:blank" && !site.webContents.isLoading()) {
-          console.log("musicview: site unresponsive, self-heal reload");
-          site.webContents.loadURL(u);
-          pollFailSince = 0;
-        }
-      } catch { /* 無視 */ }
-    }
+    await runRecoveryActions(stepRecovery(rec, {
+      now: Date.now(), isProbe: IS_ANY_PROBE, snapOk: false, snap: null,
+      url: safeSiteUrl(), urlLoading: siteLoading(),
+    }).actions);
     return { ok: false, mode, blocked: blockedCount };
   }
-  pollFailSince = 0;
 
   if (snap.videoId !== lastVideoId) {
     if (lastVideoId && lastVideoId !== snap.videoId) {
@@ -949,94 +1020,27 @@ async function pollOnce() {
     await execCmd("rate", desiredRate);
   }
 
-  // 回復でミュート再生した場合の解除(コンテンツが鳴り始めた時点で)
-  if (weMutedForRecovery && snap.state === 1 && !snap.ad) {
-    weMutedForRecovery = false;
-    console.log("musicview: recovery unmute");
-    await execCmd("unmute");
-    await execCmd("vol", desiredVol);
+  // ── 回復判定(監視状態の更新+アクション決定は lib/recovery.mjs が担う)────
+  // 遷移直後の強制投入のときだけ、ページの骨格判定のコストを払う
+  const nowMs = Date.now();
+  const url = safeSiteUrl();
+  let urlVideoId = null, urlList = null;
+  try {
+    const u = new URL(url);
+    urlVideoId = u.searchParams.get("v");
+    urlList = u.searchParams.get("list");
+  } catch { /* URL 取得失敗は無視 */ }
+  let pageOk = null;
+  if (needsPageCheck(rec, { now: nowMs, urlVideoId, videoId: snap.videoId })) {
+    pageOk = await execSite('!!document.querySelector("ytd-watch-flexy, ytd-rich-item-renderer, yt-lockup-view-model")').catch(() => null);
   }
-
-  // 曲末の自動進行(クロスフェードOFF時の安全網)。loadVideoById はプレイリストを
-  // 切り離すため、ネイティブ自動進行が働かないケースをここで拾う。
-  // キューの全ソースが空でもラジオ継続(mixUrl)で停止させない
-  if (xfadeSec <= 0 && !loopOn && snap.state === 0 && Date.now() > xfadeCooldownUntil) {
-    const nextId = queueNextId(snap);
-    const target = (nextId && nextId !== snap.videoId) ? nextId : snap.videoId;
-    if (target) {
-      console.log("musicview: end-of-track advance ->", target, nextId ? "(queue)" : "(radio fallback)");
-      site.webContents.loadURL(mixUrl(target));
-      lastSiteNavAt = Date.now();
-    }
-  }
-
-  // ユーザーが画面内遷移した直後は「遷移先を再生」が目的。YouTubeのSPA交換は
-  // 旧曲の状態次第で発火しないことがあり(一時停止中のクリックで新動画が永久に
-  // cueされない/再生中のクリックでは旧曲の終了まで遅延する実走確認)、待っていても
-  // 来ないため、URLの動画IDとプレイヤーが食い違っていたら loadVideoById で強制投入
-  // する(shuffle/回復と同じ確実な経路)
-  if (lastSiteNavAt && Date.now() - lastSiteNavAt < 90000) {
-    try {
-      const uv = new URL(site.webContents.getURL()).searchParams.get("v");
-      if (uv && /^[a-zA-Z0-9_-]{11}$/.test(uv) && uv !== snap.videoId) {
-        if (Date.now() - lastNavKickAt > 4000) {
-          lastNavKickAt = Date.now();
-          const list = new URL(site.webContents.getURL()).searchParams.get("list");
-          // ページが骨格(ポリマー起動失敗)か健全かで分岐。骨格のままメディアだけ
-          // 交換すると、キューUI/次の曲データが成立せず「取り残される」
-          const pageOk = await execSite("!!document.querySelector(\"ytd-watch-flexy, ytd-rich-item-renderer, yt-lockup-view-model\")").catch(() => null);
-          if (pageOk !== true) {
-            console.log("musicview: post-nav on broken page, full re-load", uv);
-            site.webContents.loadURL(site.webContents.getURL());
-          } else if (list && /^(RD|PL|OL|UL|FL|LL)/.test(list)) {
-            console.log("musicview: post-nav force load", uv, "with list", list.slice(0, 24));
-            await execCmd("loadlist", { videoId: uv, list });
-          } else {
-            console.log("musicview: post-nav force load", uv, "(player stuck on", snap.videoId + ")");
-            await execCmd("load", uv);
-          }
-          if (snap.state === 2) await execCmd("play");
-}
-      }
-    } catch { /* URL取得失敗は無視 */ }
-  }
-
-  // 再生/バッファ中に位置が15秒停滞 = SABR初手/セグメント要求の空振り
-  // (メインブラウザのFloorpでも同一現象・F5で即回復)。回復は位置を保持する:
-  // 同動画のストリームを取り直して停滞位置から再開し、2回だめならページを作り直す。
-  // 一時停止(2)は停滞が正常なので対象外
-  if (snap.state === 1 || snap.state === 3) {
-    const t = Number(snap.time) || 0;
-    if (Math.abs(t - watchLastTime) < 0.5) {
-      if (!watchStallSince) watchStallSince = Date.now();
-      else if (Date.now() - watchStallSince > 15000) {
-        watchStallSince = Date.now();
-        const vid = snap.videoId;
-        if (watchStallCount < 2) {
-          watchStallCount++;
-          console.log("musicview: playback frozen 15s, re-acquire stream", vid, "@", Math.round(t), "try", watchStallCount);
-          watchLastTime = -1;
-          execCmd("load", vid).catch(() => {}).then(async () => {
-            await sleep(1500);
-            await execCmd("seek", t).catch(() => {});
-            await execCmd("play").catch(() => {});
-          });
-        } else {
-          console.log("musicview: playback frozen after retries, page re-acquire");
-          watchStallCount = 0;
-          try { site.webContents.loadURL(site.webContents.getURL()); } catch (e) {}
-        }
-      }
-    } else {
-      watchStallSince = 0;
-      watchStallCount = 0;
-      watchLastTime = t;
-    }
-  } else {
-    watchStallSince = 0;
-    watchStallCount = 0;
-    watchLastTime = -1;
-  }
+  await runRecoveryActions(stepRecovery(rec, {
+    now: nowMs, isProbe: IS_ANY_PROBE, snapOk: true, snap,
+    url, urlLoading: siteLoading(), mainMuted: siteMuted(),
+    urlVideoId, urlList, pageOk,
+    xfadeOff: xfadeSec <= 0, loopOn, xfadeCooldownActive: nowMs < xfadeCooldownUntil,
+    nextId: queueNextId(snap),
+  }).actions);
 
   // Discord Rich Presence(曲/再生状態が変わったときだけ送る)
   // 画像: 大=再生中動画のサムネイル(外部直接リンク)、小=アプリのロゴアセット("art")
@@ -1080,44 +1084,8 @@ async function pollOnce() {
     titlesDirty = true;
   }
 
-  // 非表示のサイトでは YouTube 側の判断で自動再生が始まらないことがあるため、
-  // 未開始(unstarted -1 / cued 5)のままなら API で蹴る。ユーザーの任意停止(2)には触れない
-  if (snap.state === -1 || snap.state === 5) {
-    if (!unstartedSince) unstartedSince = Date.now();
-    if (Date.now() - playKickAt > 2500) {
-      playKickAt = Date.now();
-      await execCmd("play");
-    }
-    // 広告ストリームの読み込み詰まりなどで立たない場合の自己回復。
-    // ミュート再生なら自動再生が必ず通る(広告も無音でスキップされる)ことを利用し、
-    // 同曲再読込 → ミュート再生 → 次曲読込 → 同曲再読込 の順で試す(動画あたり4回)
-    if (Date.now() - unstartedSince > 8000 && recoveryTries < 4) {
-      let target = null;
-      try {
-        target = new URL(site.webContents.getURL()).searchParams.get("v");
-      } catch { /* 取れなければ諦める */ }
-      if (target && /^[a-zA-Z0-9_-]{11}$/.test(target)) {
-        if (recoveryKey !== target) { recoveryKey = target; recoveryTries = 0; }
-        recoveryTries++;
-        unstartedSince = Date.now();
-        if (recoveryTries === 2) {
-          weMutedForRecovery = true;
-          console.log("musicview: recovery mute-play");
-          await execSite(`(function(){var p=document.getElementById("movie_player");if(!p)return;try{p.mute();p.playVideo();}catch(e){}})()`);
-        } else if (recoveryTries === 3) {
-          const nid = queueNextId(snap);
-          await execCmd("load", nid && nid !== target ? nid : target);
-        } else {
-          await execCmd("load", target);
-        }
-      } else {
-        unstartedSince = Date.now();
-      }
-    }
-  } else {
-    unstartedSince = 0;
-    if (snap.videoId !== recoveryKey) recoveryTries = 0;
-  }
+  // 非表示のサイトでの未開始(-1/5)への再生キックと段階的回復は、
+  // 上の回復判定器(stepRecovery)が担う
 
   resolveTitles(snap.queue ?? [snap.videoId]);
 
@@ -1132,13 +1100,6 @@ async function pollOnce() {
   // 復元設定(音量・速度)は desiredVol/desiredRate 経由で遷移ごとに当たるため個別処理は不要
 
   const q = normalizeQueue(snap);
-  // 主役ビューがミュートのまま鳴らない事故の保険(クロスフェード交代パスの漏れ潰し)
-  try {
-    if (site.webContents.isAudioMuted()) {
-      site.webContents.setAudioMuted(false);
-      console.log("musicview: main view was muted, unmuted");
-    }
-  } catch { /* 無視 */ }
   const result = {
     ok: true,
     mode,
@@ -1207,6 +1168,81 @@ async function importCookiesSafely() {
     ensureSite().webContents.loadURL(sessionData?.url ?? "https://www.youtube.com/");
   }
   return res;
+}
+
+// ── 診断レポート ──────────────────────────────
+// 不具合報告の材料を 1 つのテキストにまとめる。回復履歴/コンソールエラー/prune
+// 統計/ビュー状態を含む。Cookie やセッションの中身は含めない(URL の v/list のみ)
+const diagConsole = []; // 直近のコンソールエラー(リング 100)
+function noteDiagConsole(src, msg) {
+  diagConsole.push({ at: Date.now(), src, msg: String(msg).slice(0, 220) });
+  if (diagConsole.length > 100) diagConsole.shift();
+}
+
+function fmtStamp(at) {
+  const d = new Date(at);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function viewDiag(name, v) {
+  try {
+    if (!v) return `${name}: (無し)`;
+    const wc = v.webContents;
+    if (wc.isDestroyed()) return `${name}: (破棄済み)`;
+    return `${name}: url=${wc.getURL().slice(0, 100)} loading=${wc.isLoading()} muted=${wc.isAudioMuted()}`;
+  } catch { return `${name}: (取得失敗)`; }
+}
+
+async function collectDiagnostics() {
+  const L = [];
+  L.push("musicview 診断レポート");
+  L.push(`生成: ${fmtStamp(Date.now())} / 版: ${app.getVersion()} / 起動: ${fmtStamp(bootAt)}`);
+  L.push(`UA: ${app.userAgentFallback}`);
+  L.push(`partition: ${PARTITION} / モード: ${mode} / 検証実行: ${IS_ANY_PROBE ? "はい" : "いいえ"}`);
+  L.push("");
+  L.push("## 再生状態");
+  const s = lastSnap?.snap;
+  if (s) {
+    L.push(`曲: ${s.title ?? "?"} / ${s.author ?? "?"} (id=${s.videoId} state=${s.state} time=${Math.round(s.time)}s dur=${Math.round(s.dur)}s ad=${!!s.ad})`);
+    if (Array.isArray(s.queue)) L.push(`キュー: ${s.queue.length} 件 (qIdx=${s.qIdx})`);
+  } else {
+    L.push("スナップなし(未再生 or ビュー無応答)");
+  }
+  L.push("");
+  L.push("## ビュー");
+  L.push(viewDiag("site(再生)", site));
+  L.push(viewDiag("browse(検索)", browse));
+  L.push(viewDiag("xfade(退避)", xfadeView));
+  let prune = "(取得できず)";
+  try { prune = (await execSite("JSON.stringify(window.__mvPrune ?? null)")) ?? prune; } catch { }
+  L.push(`prune統計: ${prune}`);
+  L.push(`adblock: 準備=${adblockReady ? "済" : "未"} ブロック累計=${blockedCount}`);
+  if (blockedSamples.length) {
+    L.push("ブロック例(直近 10 件):");
+    for (const b of blockedSamples.slice(-10)) L.push(`  ${b}`);
+  }
+  L.push(`設定: xfade=${xfadeSec}s loop=${loopOn} eq=${JSON.stringify(eqGains)} viz=${vizOn} discord=${discordClient ? (discordClient.connected ? "接続" : "未接続") : "設定なし"}`);
+  L.push(`セッション: ${sessionData ? "あり" : "なし"} / 起動時ログイン=${bootHasSession ? "あり" : "なし"}`);
+  L.push("");
+  L.push("## 回復履歴(新しい順・直近 60 件)");
+  if (rec.events.length) {
+    for (const e of rec.events.slice(-60).reverse()) {
+      L.push(`  [${fmtStamp(e.at)}] ${RECOVERY_KIND_JA[e.kind] ?? e.kind} (lv${e.level}) ${e.detail}`);
+    }
+  } else {
+    L.push("  (記録なし=回復は発火していない)");
+  }
+  L.push("");
+  L.push("## コンソールエラー(新しい順・直近 40 件)");
+  if (diagConsole.length) {
+    for (const e of diagConsole.slice(-40).reverse()) {
+      L.push(`  [${fmtStamp(e.at)}] (${e.src}) ${e.msg}`);
+    }
+  } else {
+    L.push("  (記録なし)");
+  }
+  return L.join("\n");
 }
 
 // ── モード切替 ────────────────────────────────
@@ -1361,6 +1397,24 @@ function registerIpc() {
 
   ipcMain.handle("mv:prev", () => goPrev());
   ipcMain.handle("mv:next", () => goNext());
+
+  // 診断レポートの書き出し(保存先はユーザーが選ぶ。保存後にフォルダを開く)
+  ipcMain.handle("mv:diag-save", async () => {
+    try {
+      const text = await collectDiagnostics();
+      const r = await dialog.showSaveDialog(win, {
+        title: "診断レポートの保存",
+        defaultPath: path.join(app.getPath("desktop"), `musicview-diag-${new Date().toISOString().slice(0, 10)}.txt`),
+        filters: [{ name: "テキスト", extensions: ["txt"] }],
+      });
+      if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+      await fs.writeFile(r.filePath, text, "utf8");
+      shell.showItemInFolder(r.filePath);
+      return { ok: true, path: r.filePath };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
 }
 
 // ── ウィンドウ ────────────────────────────────
@@ -1400,7 +1454,10 @@ function createWindow() {
     console.error("musicview: preload-error", path.basename(preloadPath), error.message);
   });
   win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
-    if (level >= 3) console.error(`musicview: renderer[${path.basename(String(sourceId))}:${line}] ${String(message).slice(0, 200)}`);
+    if (level >= 3) {
+      noteDiagConsole("app-ui", message);
+      console.error(`musicview: renderer[${path.basename(String(sourceId))}:${line}] ${String(message).slice(0, 200)}`);
+    }
   });
   win.once("ready-to-show", () => win.show());
   win.on("resize", applyMode);
@@ -1412,644 +1469,6 @@ function createWindow() {
     saveTitles();
   });
   win.on("closed", () => { win = null; });
-}
-
-// ── probe(実走確認)────────────────────────────
-async function probeShot(wc, file) {
-  const img = await wc.capturePage();
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, img.toPNG());
-  console.log("probe: shot saved", file);
-}
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-async function runProbe() {
-  const log = (...a) => console.log("probe:", ...a);
-  const TEST_VID = "dQw4w9WgXcQ";
-  await sleep(1500);
-  ensureSite();
-  log("loading mix (hidden)", mixUrl(TEST_VID));
-  site.webContents.loadURL(mixUrl(TEST_VID));
-
-  // 可視性スプーフ+再生キックで非表示のまま流れ始めるかを観察
-  let snap = null;
-  for (let i = 0; i < 12; i++) {
-    await sleep(3000);
-    snap = await pollOnce();
-    const p = snap?.snap;
-    const diag = await execSite(`JSON.stringify({
-      href: location.href.slice(0, 100),
-      vis: document.visibilityState,
-      hasCtl: !!window.__mvCtl,
-      player: !!document.getElementById("movie_player"),
-      adShowing: !!document.querySelector(".ad-showing"),
-      methods: (function () {
-        var p = document.getElementById("movie_player");
-        if (!p) return null;
-        return ["getPlaylist", "getPlaylistIndex", "nextVideo", "previousVideo", "playVideoAt"].map(function (m) { return m + ":" + typeof p[m]; }).join(" ");
-      })(),
-      video: (function () {
-        var v = document.querySelector("video.html5-main-video");
-        return v ? { paused: v.paused, t: Math.round(v.currentTime), dur: Math.round(v.duration || 0) } : null;
-      })()
-    })`).catch(e => "diag-err:" + String(e).slice(0, 80));
-    let ext = null;
-    try {
-      // EXTRACT_ITEMS は末尾にセミコロン付きの IIFE なので、そのまま代入式に埋め込む
-      ext = await execSite(`(function () {
-        try {
-          var r = ${EXTRACT_ITEMS}
-          return JSON.stringify({ json: r.json.length, dom: r.dom.length, sample: r.dom[0] || r.json[0] || null, yid: typeof window.ytInitialData });
-        } catch (e) { return "ERR:" + e.message; }
-      })()`);
-    } catch (e) { ext = "ext-err:" + String(e).slice(0, 80); }
-    log(`t=${(i + 1) * 3}s`, diag, "extract:", JSON.stringify(ext),
-      "videoId:", p?.videoId, "state:", p?.state,
-      "queue:", p?.queue?.length ?? null,
-      "title:", JSON.stringify(String(p?.title ?? "").slice(0, 40)));
-    if (snap?.ok && p?.state === 1 && p?.dur > 0) break;
-  }
-
-  // 非表示のまま音が続くか(音楽モードの根幹)
-  if (snap?.ok && snap?.snap?.state === 1) {
-    const t1 = snap.snap.time;
-    await sleep(6000);
-    const s2 = await pollOnce();
-    log("hidden-playback", "t1:", Math.round(t1), "t2:", Math.round(s2?.snap?.time ?? -1),
-      s2?.snap?.time > t1 ? "ADVANCED-OK" : "STALLED");
-    const late = await pollOnce();
-    log("late queue:", late?.snap?.queue?.length ?? null, "estimated:", late?.queueEstimated,
-      "qIdx:", late?.snap?.qIdx);
-    log("late queue titles:", (late?.queueItems ?? []).slice(0, 4).map(i => JSON.stringify(i.title ?? null)).join(" "));
-  }
-
-  // データ層の広告剥ぎ(yt-preload)が動いているか。キーが存在した応答だけ加算されるので
-  // 広告なし動画だけだと 0 のままでも正常
-  try {
-    const pr = await site.webContents.executeJavaScript(
-      `JSON.stringify(window.__mvPrune ?? null)`,
-    );
-    log("yt-prune stats:", pr);
-  } catch (e) { log("yt-prune stats: err", e.message); }
-
-  // 前/次ボタン。次で進んで履歴が積まれ、前で戻る往復を確認する
-  // (プレイヤーAPIの nextVideo/previousVideo は実走で無反応のため loadVideoById 経路)
-  try {
-    const s0 = await pollOnce();
-    const r1 = await win.webContents.executeJavaScript("window.musicview.next()");
-    await sleep(3000);
-    const s1 = await pollOnce();
-    const r2 = await win.webContents.executeJavaScript("window.musicview.prev()");
-    await sleep(3000);
-    const s2 = await pollOnce();
-    log("prev-next:", s0?.snap?.videoId, "-> next", JSON.stringify(r1), "->", s1?.snap?.videoId,
-      "-> prev", JSON.stringify(r2), "->", s2?.snap?.videoId,
-      (s1?.snap?.videoId !== s0?.snap?.videoId && s2?.snap?.videoId === s0?.snap?.videoId) ? "ROUNDTRIP-OK" : "CHECK");
-  } catch (e) { log("prev-next err:", e.message); }
-
-  // fetch ラッパが詰まらないこと(サイト画面で動画クリック時に読み込みが止まる回帰)。
-  // 実エンドポイントへの POST は YouTube 側の判断で 400 系になるが、約束が解決して
-  // 応答オブジェクトを受け取れればパイプは健全
-  try {
-    const fp = await Promise.race([
-      site.webContents.executeJavaScript(`(async function () {
-        try {
-          // キー無しで叩く(YouTube が 400 を返してもパイプの健全性確認としては十分)。
-          // Innertube の公開ウェブキーをソースに書くと GitHub のシークレットスキャンに
-          // 引っかかるため定数は持ち込まない
-          const r = await fetch("/youtubei/v1/player", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: "2.1" } } }) });
-          return "status:" + r.status;
-        } catch (e) { return "fetch-err:" + String(e && e.message).slice(0, 60); }
-      })()`),
-      new Promise(r => setTimeout(() => r("STUCK-8s"), 8000)),
-    ]);
-    log("fetch-pipe:", fp);
-  } catch (e) { log("fetch-pipe: err", e.message); }
-
-  const recs = await extractRecs();
-  log("watch recs:", recs.length, "first:", JSON.stringify(recs[0] ?? null));
-
-  const searchQ = "ヨルシカ";
-  ensureBrowse();
-  browse.webContents.loadURL(searchUrl(searchQ));
-  const sr = await extractSearchResults(searchQ);
-  log("search results:", sr.length, "first:", JSON.stringify(sr[0] ?? null));
-  // 検索中も再生が止まらないこと(別ビュー構成の根幹)を確認する
-  const durSearch = await pollOnce();
-  log("playback during search:", durSearch?.snap?.state, "time:", Math.round(durSearch?.snap?.time ?? -1));
-  await sleep(1000);
-  // 隠しビューは capturePage が空になるため、probe の間だけ可視化して撮る
-  {
-    const [w, h] = win.getContentSize();
-    browse.setBounds({ x: 0, y: TOPBAR_H, width: w, height: Math.max(0, h - TOPBAR_H) });
-    browse.setVisible(true);
-    await sleep(800);
-    await probeShot(browse.webContents, path.join(DATA_DIR, "probe", "probe-search.png"));
-    browse.setVisible(false);
-  }
-
-  // 広告リクエストが止まっているか(サイト側コンテキストから promo ドメインを叩く)
-  let adProbe = "fetch-failed";
-  try {
-    adProbe = await site.webContents.executeJavaScript(
-      `fetch("https://securepubads.g.doubleclick.net/musicview-probe", { mode: "no-cors" }).then(() => "ad-NOT-blocked").catch(() => "ad-blocked")`,
-    );
-  } catch (e) { adProbe = "err:" + e.message; }
-  log("adblock", adProbe, "blockedCount", blockedCount);
-  for (const s of blockedSamples) log("blocked:", s);
-
-  // サイト画面からの動画選択(SPA遷移)の再現。/youtubei/v1/player の fetch 経路は
-  // mixロード(inline)やloadVideoById(プレイヤー内部)では通らないため、ここでだけ検証できる
-  {
-    const onConsole = (_e, level, message) => {
-      if (level >= 3) log("site-console-err:", String(message).slice(0, 200));
-    };
-    const onNav = (_e, url) => log("site-nav:", String(url).slice(0, 80));
-    site.webContents.on("console-message", onConsole);
-    site.webContents.on("did-navigate", onNav);
-    site.webContents.on("did-navigate-in-page", onNav);
-    try {
-      site.webContents.loadURL("https://www.youtube.com/");
-      await sleep(7000);
-      const clicked = await site.webContents.executeJavaScript(`(function () {
-        var cands = ["ytd-rich-item-renderer", "yt-lockup-view-model", "ytd-video-renderer", "a#video-title-link"];
-        for (var i = 0; i < cands.length; i++) {
-          var el = document.querySelector(cands[i]);
-          if (el) { el.click(); return cands[i]; }
-        }
-        return null;
-      })()`);
-      log("site-click:", JSON.stringify(clicked));
-      for (let i = 0; i < 8; i++) {
-        await sleep(2500);
-        const st = await site.webContents.executeJavaScript(`JSON.stringify((function () {
-          var s = window.__mvCtl ? (window.__mvCtl.snap() || {}) : {};
-          return {
-            href: location.href.slice(0, 90),
-            vid: s.videoId || null,
-          q: Array.isArray(s.queue) ? s.queue.length : null,
-          q1: Array.isArray(s.queue) ? s.queue[1] : null,
-            state: s.state ?? null,
-            ad: !!document.querySelector(".ad-showing"),
-            spinner: !!document.querySelector(".ytp-spinner, tp-yt-paper-spinner.active"),
-            prune: window.__mvPrune ? JSON.stringify(window.__mvPrune) : null
-          };
-        })())`);
-        log(`site-click t=${(i + 1) * 2.5}s:`, st);
-        const p = JSON.parse(st);
-        if (p.vid && p.state === 1 && !p.ad) { log("site-click PLAYING"); break; }
-      }
-    } catch (e) { log("site-click err:", e.message); }
-    site.webContents.removeListener("console-message", onConsole);
-    site.webContents.removeListener("did-navigate", onNav);
-    site.webContents.removeListener("did-navigate-in-page", onNav);
-  }
-
-  setMode("music");
-  await sleep(1200);
-  await probeShot(win.webContents, path.join(DATA_DIR, "probe", "probe-music.png"));
-
-  // UIヒットテスト: 演奏ボタンの中心に別要素が重なってクリックを奪っていないか
-  // (「ボタンが触れなくなる」事故の検出用)
-  try {
-    const hit = await win.webContents.executeJavaScript(`(function () {
-      return ["prev", "pp", "next", "eq-btn"].map(function (id) {
-        const b = document.getElementById(id);
-        if (!b) return { id: id, missing: true };
-        const r = b.getBoundingClientRect();
-        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        const name = top ? (top.id || (top.tagName || "?") + "." + String(top.className && top.className.baseVal !== undefined ? top.className.baseVal : top.className || "").slice(0, 40)) : "none";
-        return { id: id, top: name, covered: top !== b && !(b.contains(top)) };
-      });
-    })()`);
-    log("hit-test:", JSON.stringify(hit));
-  } catch (e) { log("hit-test err:", e.message); }
-
-  // EQボタンの新挙動(E2E): クリック=ON/OFF(赤化)・右クリック=パネル。
-  // プリセット適用→ボタンが赤くなる→パネルの折り返し含めてスクショで確認
-  try {
-    const eqUi = await win.webContents.executeJavaScript(`(async function () {
-      const btn = document.getElementById("eq-btn");
-      btn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
-      await new Promise(r => setTimeout(r, 300));
-      const preset = document.querySelector('#eq-panel [data-preset="bass"]');
-      preset.click();
-      await new Promise(r => setTimeout(r, 400));
-      return {
-        on: btn.classList.contains("on"),
-        panelOpen: !document.getElementById("eq-panel").classList.contains("hidden"),
-        presetWrapHeight: document.querySelector(".pop-row.presets").offsetHeight,
-      };
-    })()`);
-    log("eq-toggle:", JSON.stringify(eqUi));
-    await probeShot(win.webContents, path.join(DATA_DIR, "probe", "probe-eq.png"));
-    await win.webContents.executeJavaScript(`(function () {
-      document.getElementById("eq-close").click();
-      document.getElementById("eq-btn").click(); // OFFへ戻す(赤が消える)
-    })()`);
-    const eqOff = await win.webContents.executeJavaScript(
-      `!document.getElementById("eq-btn").classList.contains("on")`,
-    );
-    log("eq-toggle off:", eqOff ? "OK" : "NG");
-  } catch (e) { log("eq-toggle err:", e.message); }
-
-  // F12 配線の確認: アプリUI側にキー入力を送り DevTools が開くか(サイト側ビューも
-  // 同じ attachDevtoolsToggle を共有する)
-  try {
-    win.webContents.sendInputEvent({ type: "keyDown", keyCode: "F12" });
-    await sleep(900);
-    const opened = win.webContents.isDevToolsOpened();
-    log("f12:", opened ? "OPEN-OK" : "NOT-OPENED");
-    if (opened) win.webContents.closeDevTools();
-  } catch (e) { log("f12 err:", e.message); }
-
-  // mv:cmd pause/play の健全性(ハンドラ内の未定義変数等の実行時エラーを検出)
-  try {
-    await execCmd("pause");
-    await sleep(400);
-    await execCmd("play");
-    log("pause-play cmd: OK");
-    for (let vi = 0; vi < 5; vi++) {
-      await sleep(3000);
-      const lv = await execSite("JSON.stringify({ lv: window.__mvCtl ? window.__mvCtl.levels(28) : null, dis: window.__mvAudioDisabled === true, has: !!window.__mvAudio, ready: window.__mvPageReady === true, paused: (function(){var v=document.querySelector('video.html5-main-video');return v?v.paused:null;})(), ct: (function(){var v=document.querySelector('video.html5-main-video');return v?Math.round(v.currentTime*10)/10:null;})(), fails: window.__mvAudioFails === undefined ? null : window.__mvAudioFails })").catch(() => "?");
-      log("viz levels:", String(lv).slice(0, 230));
-      if (String(lv).indexOf("null") === -1 && vi >= 2) break;
-    }
-  } catch (e) { log("pause-play err:", e.message); }
-
-  setMode("site");
-  await sleep(1500);
-  await probeShot(site.webContents, path.join(DATA_DIR, "probe", "probe-site.png"));
-
-  app.exit(0);
-}
-
-// サイト画面でのホーム→動画クリック(SPA遷移)を実走観察する。
-// 「クリックしたら読み込みが止まる」を捕獲するための観測装置:
-//   - シャドウDOMを潜って本物の動画要素をクリック
-//   - 遷移/再生状態/スピナー/広告/解析統計を3秒間隔で追跡
-//   - executeJavaScript が5秒返らなかったら「レンダラー固まり」として記録
-//   - コンソールエラー・レンダラー死亡・遷移イベントをすべて残す
-async function runProbeSpa() {
-  const log = (...a) => console.log("spa:", ...a);
-  await sleep(2000);
-  // 切り分け用: セッションのクロスフェード設定を無効化して観測する(衝突の有無を分離)
-  if (process.env.MUSICVIEW_SPA_NOXFADE === "1") {
-    xfadeSec = 0;
-    log("xfade disabled for this run");
-  }
-  ensureSite();
-  setMode("site");
-  const wc = site.webContents;
-  const onConsole = (_e, level, message, line, sourceId) => {
-    if (level >= 3) log("console-err:", String(message).slice(0, 200), "@", String(sourceId || "").split("/").pop() + ":" + line);
-  };
-  wc.on("console-message", onConsole);
-  wc.on("render-process-gone", (_e, d) => log("RENDERER-GONE:", JSON.stringify(d)));
-  wc.on("did-navigate", (_e, u) => log("nav:", String(u).slice(0, 90)));
-  wc.on("did-navigate-in-page", (_e, u, isMain) => { if (isMain) log("in-page-nav:", String(u).slice(0, 90)); });
-
-  wc.loadURL(sessionData?.url ?? "https://www.youtube.com/");
-  await sleep(9000);
-  // 前回曲からの復元を待ってから、ロゴ経由のSPA遷移でホームへ行く(ユーザーの実フロー)
-  for (let i = 0; i < 10; i++) {
-    const s = await wc.executeJavaScript(`JSON.stringify((function () {
-      var s = window.__mvCtl ? (window.__mvCtl.snap() || {}) : {};
-      return { state: s.state ?? null, href: location.href.slice(0, 60) };
-    })())`).catch(() => "{}");
-    try { const p = JSON.parse(s); if (p.state === 1) { log("restored:", p.href, "playing"); break; } } catch { }
-    await sleep(2000);
-  }
-  const logoClicked = await wc.executeJavaScript(`(function () {
-    var el = document.querySelector("a#logo") || document.querySelector("ytd-topbar-logo-renderer a") || document.querySelector("ytd-topbar-logo-renderer");
-    if (!el) return "no-logo";
-    el.click();
-    return "logo";
-  })()`);
-  log("logo-click:", JSON.stringify(logoClicked));
-  await sleep(6000);
-
-  const census = await wc.executeJavaScript(`(function () {
-    function deepAll(sel) {
-      var out = [];
-      function walk(root) {
-        try { root.querySelectorAll(sel).forEach(function (e) { out.push(e); }); } catch (e) {}
-        try {
-          var all = root.querySelectorAll("*");
-          for (var i = 0; i < all.length; i++) { if (all[i].shadowRoot) walk(all[i].shadowRoot); }
-        } catch (e) {}
-      }
-      walk(document);
-      return out;
-    }
-    var cands = ["ytd-rich-item-renderer", "yt-lockup-view-model", "ytd-video-renderer", "a#video-title-link", "ytd-video-preview", "ytd-media-renderer"];
-    var found = {};
-    cands.forEach(function (c) { found[c] = deepAll(c).length; });
-    found.readyState = document.readyState;
-    found.title = (document.title || "").slice(0, 40);
-    // 実際に何があるか: ytd-app 配下のタグ名上位と、クリック可能そうな要素の感触
-    var tags = {};
-    try {
-      document.querySelectorAll("ytd-app *").forEach(function (e) {
-        var t = e.tagName.toLowerCase();
-        if (t.indexOf("ytd-") === 0 || t.indexOf("yt-") === 0) tags[t] = (tags[t] || 0) + 1;
-      });
-    } catch (e) {}
-    found.topTags = Object.entries(tags).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 14);
-    found.appChildren = (function () {
-      var a = document.querySelector("ytd-app");
-      return a ? [...a.children].map(function (e) { return e.tagName.toLowerCase(); }).join(",") : "no-ytd-app";
-    })();
-    found.permBar = (function () {
-      var b = document.querySelector("ytd-permission-role-bottom-bar-renderer, ytd-consent-bump-v2-lightbox");
-      return b ? (b.textContent || "").replace(/\s+/g, " ").slice(0, 120) : "none";
-    })();
-    found.ytInitialData = typeof window.ytInitialData === "object" && window.ytInitialData ? JSON.stringify(window.ytInitialData).length : String(typeof window.ytInitialData);
-    found.browse = !!document.querySelector("ytd-browse");
-    found.bodyText = (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 150);
-    return JSON.stringify(found);
-  })()`);
-  try {
-    await probeShot(wc, path.join(DATA_DIR, "probe", "spa-home.png"));
-  } catch (e) { log("shot err:", e.message); }
-  log("home census:", census);
-
-  // 観測ループ: 見えているサムネ(可視アンカー)を実際にクリックし、遷移→再生開始
-  // までの時間を追跡する。40秒再生に至らなければ STALL として記録。複数回繰り返して
-  // 間発性の止まりを捕まえる
-  const acCount = { n: 0 };
-  wc.on("console-message", (_e, _level, message) => {
-    if (String(message || "").indexOf("AudioContext") !== -1) acCount.n++;
-  });
-  const readState = () => Promise.race([
-    wc.executeJavaScript(`JSON.stringify((function () {
-      var s = window.__mvCtl ? (window.__mvCtl.snap() || {}) : {};
-      var v = document.querySelector("video.html5-main-video");
-      var sp = document.querySelector(".ytp-spinner");
-      return {
-        href: location.href.slice(0, 80),
-        vid: s.videoId || null,
-        q: (window.__mvCtl && window.__mvCtl.snap() && window.__mvCtl.snap().queue) ? window.__mvCtl.snap().queue.length : null,
-        state: s.state ?? null,
-        ad: !!document.querySelector(".ad-showing"),
-        spinner: sp ? !sp.hasAttribute("hidden") : false,
-        vidT: v ? Math.round(v.currentTime * 10) / 10 : null,
-        vidPaused: v ? v.paused : null,
-        acErr: window.__mvAcErr || 0,
-        prune: window.__mvPrune ? JSON.stringify(window.__mvPrune) : null
-      };
-    })())`).catch(e => "exec-err:" + String(e && e.message).slice(0, 80)),
-    new Promise(r => setTimeout(() => r("EXEC-STUCK-5s(レンダラー無応答)"), 5000)),
-  ]);
-
-  let stalls = 0, okays = 0;
-  // ユーザーフロー再現: 旧曲を一時停止した状態でサムネをクリックする
-  // (この状態だと新動画が停止のまま張り付くのが本来の事故。post-nav kick の検証)
-  await execCmd("pause");
-  log("old video paused (user flow 再現)");
-  await sleep(1500);
-  for (let r = 1; r <= 6; r++) {
-    const pick = await wc.executeJavaScript(`(function () {
-      try {
-      // フィードの実体はシャドウDOM配下のロックアップ(JS遷移・hrefなし)。
-      // 深い再帰はスタックを溢れさせるので明示スタックで潜る
-      var items = [];
-      var stack = [document];
-      while (stack.length) {
-        var root = stack.pop();
-        try {
-          root.querySelectorAll("yt-lockup-view-model, ytd-rich-item-renderer").forEach(function (a) { items.push(a); });
-        } catch (e) {}
-        try {
-          var all = root.querySelectorAll("*");
-          for (var i = 0; i < all.length; i++) { if (all[i].shadowRoot) stack.push(all[i].shadowRoot); }
-        } catch (e) {}
-      }
-      var cur = window.__mvCtl ? (window.__mvCtl.snap() || {}).videoId : null;
-      var ok = items.filter(function (el) {
-        try {
-          var r = el.getBoundingClientRect();
-          return r.width >= 180 && r.height >= 80;
-        } catch (e) { return false; }
-      });
-      if (!ok.length) return null;
-      var el = ok[Math.floor(Math.random() * Math.min(ok.length, 6))];
-      // 動画ID: data属性 → サムネimgのURL(/vi/<ID>/) → data JSON の順で拾う
-      var v = el.getAttribute("content-id") || el.getAttribute("contentId") || null;
-      if (!v) {
-        try {
-          // innerHTML から "/vi/<ID>/hqdefault.jpg" の ID を拾う(正規表現は
-          // テンプレートリテラルのエスケープ(\v等)で壊れるため使わない)
-          var html = el.innerHTML || "";
-          var k = html.indexOf("/vi/");
-          if (k !== -1) {
-            var cand = html.substring(k + 4, k + 15);
-            if (/^[a-zA-Z0-9_-]{11}$/.test(cand)) v = cand;
-          }
-        } catch (e) {}
-      }
-      if (!v) {
-        try {
-          var m2 = JSON.stringify(el.data || el.__data || "").match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-          if (m2 && m2[1]) v = m2[1];
-        } catch (e) {}
-      }
-      if (!v) return null; // ID不明の lockup は押さない(無駄打ち防止)
-      try { el.scrollIntoView({ block: "center" }); } catch (e) {}
-      // サムネ画像部分をクリックする(ユーザーと同じ target)
-      var thumb = el.querySelector("img, yt-image, *[class*=thumbnail]") || el;
-      thumb.click();
-      return v;
-      } catch (e) { return "err:" + String(e && e.message).slice(0, 80); }
-    })()`).catch(e => "click-err:" + String(e && e.message).slice(0, 60));
-    if (typeof pick !== "string" || !/^[a-zA-Z0-9_-]{11}$/.test(pick)) {
-      log(`round${r}: クリック対象なし(${JSON.stringify(pick)}) — 3秒後に再試行`);
-      await sleep(3000);
-      continue;
-    }
-    log(`round${r}: サムネクリック -> ${pick}`);
-    const t0 = Date.now();
-    let played = false;
-    for (let i = 1; i <= 20 && !played; i++) {
-      await sleep(2000);
-      const st = await readState();
-      log(`  r${r} +${Math.round((Date.now() - t0) / 1000)}s:`, st);
-      if (typeof st === "string" && st.indexOf("{") === 0) {
-        try {
-          const p = JSON.parse(st);
-          if (p.vid === pick && p.state === 1 && !p.ad && Number(p.vidT) > 1) played = true;
-        } catch { /* 次へ */ }
-      }
-    }
-    const took = Math.round((Date.now() - t0) / 1000);
-    if (played) { okays++; log(`round${r}: OK(${took}秒で再生開始) acErr=${acCount.n}`); }
-    else { stalls++; log(`round${r}: STALL(40秒で再生に至らず) acErr=${acCount.n}`); }
-  }
-  log(`RESULT: ok=${okays} stall=${stalls} audioContextErr累計=${acCount.n}`);
-
-  // 曲末自動進行の検証: 今の曲を末尾5秒へシークし、次の動画へ自動で進むか
-  try {
-    const before = (await pollOnce())?.snap;
-    if (before && before.state === 1 && before.dur > 30) {
-      await execCmd("seek", Math.max(0, before.dur - 5));
-      log("end-advance: seek to", Math.round(before.dur - 5), "/", Math.round(before.dur), "vid", before.videoId);
-      for (let i = 0; i < 16; i++) {
-        await sleep(2000);
-        const st = await pollOnce();
-        const v = st?.snap?.videoId, t = Math.round(st?.snap?.time ?? -1), stt = st?.snap?.state;
-        log(`  end-advance +${(i + 1) * 2}s: vid=${v} state=${stt} t=${t}`);
-        if (v && v !== before.videoId && stt === 1) { log("end-advance: ADVANCED-OK ->", v); break; }
-      }
-    }
-  } catch (e) { log("end-advance err:", e.message); }
-  wc.removeListener("console-message", onConsole);
-  app.exit(0);
-}
-
-// Cookie 取り込みの実走確認: 実パーティションへ取り込み → ホームを開いてログイン面を確認。
-// importCookiesSafely が既存クッキーを掃除してから入れるため、何度実行しても冪等
-async function runProbeImport() {
-  const log = (...a) => console.log("probe-import:", ...a);
-  await sleep(1500);
-  ensureSite();
-  log("site UA:", site.webContents.getUserAgent());
-  // ナビゲーション応答が運ぶ Set-Cookie(削除)を観測する(名前と削除フラグのみ)
-  const deletions = [];
-  const dbg = site.webContents.debugger;
-  try {
-    await dbg.attach();
-    await dbg.sendCommand("Network.enable");
-    dbg.on("Network.responseReceivedExtraInfo", (_e, params) => {
-      const sc = params.headers["set-cookie"] ?? params.headers["Set-Cookie"];
-      if (!sc) return;
-      for (const line of sc.split("\n")) {
-        const name = line.split("=")[0].trim();
-        const deleting = /max-age=0|expires=thu, 01 jan 1970/i.test(line);
-        if (deleting && deletions.length < 12 && !deletions.includes(name)) deletions.push(`${name}(del)`);
-      }
-    });
-  } catch (e) {
-    log("debugger err:", e.message);
-  }
-  const res = await importCookiesSafely();
-  const ses = session.fromPartition(PARTITION);
-  await sleep(1000);
-  const cookies = await ses.cookies.get({});
-  const names = new Set(cookies.map(c => c.name));
-  const sessionNames = ["SAPISID", "__Secure-1PSID", "__Secure-3PSID", "SID"].filter(n => names.has(n));
-  log("partition cookies:", cookies.length, "session:", sessionNames.join(",") || "none", "live:", !!res.live);
-  log("set-cookie deletions:", deletions.join(" ") || "none");
-  try { await dbg.detach(); } catch { /* 未attachなら無視 */ }
-
-  await sleep(4000);
-  const state = await execSite(`JSON.stringify({
-    title: document.title.slice(0, 40),
-    online: navigator.onLine,
-    avatar: !!document.querySelector("#avatar-btn"),
-    signin: !!document.querySelector("#masthead a[href*='accounts.google']"),
-    ytcfgLoggedIn: (function () {
-      try { return window.ytcfg.get("LOGGED_IN"); } catch (e) { return "n/a"; }
-    })()
-  })`).catch(e => "err " + e.message);
-  log("home state:", state);
-  setMode("site");
-  await sleep(800);
-  await probeShot(site.webContents, path.join(DATA_DIR, "probe", "probe-import.png"));
-  app.exit(0);
-}
-
-// サイト表示モードの実見(アプリのトップバーがちゃんと見えているか)をデスクトップごと撮る
-async function runProbeDesktop() {
-  const log = (...a) => console.log("probe-desktop:", ...a);
-  const { desktopCapturer } = await import("electron");
-  await sleep(2000);
-  ensureSite();
-  await site.webContents.loadURL("https://www.youtube.com/");
-  await sleep(5000);
-  await probeShot(win.webContents, path.join(DATA_DIR, "probe", "probe-ui.png")); // 音楽モードのUI
-  setMode("site");
-  await sleep(2500);
-  // レンダラ側の状態が追従したか(ラベル不一致事故の再発チェック)
-  try {
-    const rstate = await win.webContents.executeJavaScript(
-      `(typeof window.musicview) + " / " + document.body.dataset.mode + " / " + document.getElementById("mode").textContent`,
-    );
-    log("renderer mode state:", rstate);
-  } catch (e) { log("renderer state err:", e.message); }
-  const sources = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 1920, height: 1080 } });
-  if (sources.length) {
-    const file = path.join(DATA_DIR, "probe", "probe-desktop.png");
-    await fs.writeFile(file, sources[0].thumbnail.toPNG());
-    log("desktop shot saved:", file);
-  } else {
-    log("no screen source");
-  }
-  app.exit(0);
-}
-
-// クロスフェードの実走確認: 曲の終端付近へシークして、フェード→主役交代を観測する
-async function runProbeXfade() {
-  const log = (...a) => console.log("probe-xfade:", ...a);
-  await sleep(1500);
-  ensureSite();
-  site.webContents.loadURL(mixUrl("dQw4w9WgXcQ"));
-  let s = null;
-  for (let i = 0; i < 14; i++) {
-    await sleep(2500);
-    s = await pollOnce();
-    if (s?.ok && s.snap.state === 1 && s.snap.dur > 0) break;
-  }
-  log("playing:", s?.snap?.videoId, "dur:", Math.round(s?.snap?.dur ?? 0));
-  if (!s?.ok) { app.exit(1); return; }
-  xfadeSec = 8;
-  const seed = s.snap.videoId;
-  await execCmd("seek", Math.max(1, s.snap.dur - 12));
-  log("seeked to", Math.round(s.snap.dur - 12), "xfadeSec=8");
-  let prevVid = seed;
-  for (let i = 0; i < 30; i++) {
-    await sleep(1500);
-    const r = await pollOnce();
-    const vid = r?.snap?.videoId ?? "?";
-    const phase = xfade ? xfade.phase : "idle";
-    log(`t+${Math.round((i + 1) * 1.5)}s`, "phase:", phase, "videoId:", vid,
-      "time:", Math.round(r?.snap?.time ?? -1), "mainVol:", Math.round(r?.snap?.vol ?? -1));
-    if (prevVid !== "dQw4w9WgXcQ" && vid === prevVid && !xfade && i > 3) {
-      log("xfade OK: swapped to next track,", "newVol:", Math.round(r?.snap?.vol ?? -1));
-      // 手動遷移(ミックス起動)もクロスフェードに乗ることを確認する(実際のボタン経由)
-      const beforeId = (await pollOnce())?.snap?.videoId;
-      log("manual transition test: mix() click, current =", beforeId);
-      const clicked = await win.webContents.executeJavaScript("window.musicview.mix()");
-      log("mix() returned:", clicked);
-      for (let j = 0; j < 45; j++) {
-        await sleep(1500);
-        const r2 = await pollOnce();
-        const vid2 = r2?.snap?.videoId ?? "?";
-        log(`manual t+${Math.round((j + 1) * 1.5)}s`, "phase:", xfade ? xfade.phase : "idle",
-          "videoId:", vid2, "time:", Math.round(r2?.snap?.time ?? -1), "vol:", Math.round(r2?.snap?.vol ?? -1));
-        if (!xfade && vid2 !== beforeId && r2?.snap?.state === 1 && (r2?.snap?.time ?? 99) < 15) {
-          log("manual transition OK: next track playing with volume carried over");
-          // 深シーク(フェード窓より深い)でも破綻しないことを確認する
-          const deep = (await pollOnce())?.snap;
-          if (deep && deep.dur > 30) {
-            log("deep seek test ->", Math.round(deep.dur - 1.5));
-            await execCmd("seek", deep.dur - 1.5);
-            for (let k = 0; k < 30; k++) {
-              await sleep(1500);
-              const r3 = await pollOnce();
-              log(`deep t+${Math.round((k + 1) * 1.5)}s`, "videoId:", r3?.snap?.videoId,
-                "state:", r3?.snap?.state, "time:", Math.round(r3?.snap?.time ?? -1),
-                "vol:", Math.round(r3?.snap?.vol ?? -1), "xfade:", xfade ? xfade.phase : "none");
-            }
-          }
-          break;
-        }
-      }
-      break;
-    }
-    if (vid !== "dQw4w9WgXcQ") prevVid = vid;
-  }
-  app.exit(0);
 }
 
 // ビジュアライザー: 主役ビューの解析値をUIへ送る(約11fps、UI側で補間して描画)
@@ -2069,69 +1488,6 @@ function ensureVizPump() {
     } catch { /* 無視 */ }
   }, 90);
 }
-
-// EQ/ビジュアライザーの実走確認: 再生中のページにオーディオグラフを接続し、
-// ゲイン反映と解析値の流れを確認する
-async function runProbeAudio() {
-  const log = (...a) => console.log("probe-audio:", ...a);
-  await sleep(1500);
-  ensureSite();
-  site.webContents.loadURL(watchUrl("dQw4w9WgXcQ"));
-  let s = null;
-  for (let i = 0; i < 14; i++) {
-    await sleep(2500);
-    s = await pollOnce();
-    if (s?.ok && s.snap.state === 1 && s.snap.dur > 0) break;
-  }
-  log("playing:", s?.snap?.videoId, "state:", s?.snap?.state);
-  if (!s?.ok) { app.exit(1); return; }
-  eqGains = clampGains([12, 2, -2, 0, 2]);
-  await applyAudioTo(site);
-  await sleep(2500);
-  const chk = await execOn(site, `JSON.stringify({
-    has: !!window.__mvAudio,
-    g0: window.__mvAudio ? window.__mvAudio.bands[0].gain.value : null,
-    g2: window.__mvAudio ? window.__mvAudio.bands[2].gain.value : null,
-    lv: window.__mvCtl ? window.__mvCtl.levels(8) : null
-  })`);
-  log("audio:", chk);
-  const r = await pollOnce();
-  log("viz:", vizOn, "pump-sent:", r?.ok, "levels-via-renderer:", "see-ui");
-  setMode("music");
-  await sleep(1500);
-  await probeShot(win.webContents, path.join(DATA_DIR, "probe", "probe-audio.png"));
-  app.exit(0);
-}
-
-// Discord接続の実走確認: 保存済みIDで接続し、テストプレゼンスを送る
-async function runProbeDiscord() {
-  const log = (...a) => console.log("probe-discord:", ...a);
-  await sleep(1000);
-  const id = (await fs.readFile(path.join(DATA_DIR, "discord.id"), "utf8")).trim();
-  log("client id:", id ? `${id.slice(0, 6)}…` : "(none)");
-  const dc = new DiscordPresence(id, (...a) => log("discord", ...a));
-  dc.start();
-  await sleep(5000);
-  log("connected:", dc.connected);
-  if (dc.connected) {
-    // CustomRP のドキュメント準拠: 外部画像の直接リンクはそのまま large_image に使える
-    dc.update({
-      details: "musicview 接続テスト(60秒間表示)",
-      state: "リックのサムネ画像が出ているか確認してください",
-      startAt: Date.now() - 10000,
-      largeImage: thumbUrl("dQw4w9WgXcQ"),
-      largeText: "Never Gonna Give You Up — musicview",
-      force: true,
-    });
-    log("test presence sent — 60秒間表示されます");
-    await sleep(60000);
-    dc.clear();
-    await sleep(1000);
-  }
-  dc.close();
-  app.exit(0);
-}
-
 // ── 起動 ──────────────────────────────────────
 app.whenReady().then(async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -2216,8 +1572,27 @@ app.whenReady().then(async () => {
 
   if (!IS_ANY_PROBE) setInterval(() => { saveSession(); saveTitles(); }, 5000);
 
-  if (IS_PROBE) runProbe().catch(e => { console.error("probe error:", e); app.exit(1); });
-  if (IS_SPA_PROBE) runProbeSpa().catch(e => { console.error("spa error:", e); app.exit(1); });
+  // probe 群(probes.mjs)へ渡す橋渡し。probe は本体の状態に ctx 経由でだけ触れる
+  const probes = makeProbes({
+    DATA_DIR, PARTITION, TOPBAR_H,
+    get site() { return site; },
+    get win() { return win; },
+    get browse() { return browse; },
+    get xfade() { return xfade; },
+    get vizOn() { return vizOn; },
+    sessionUrl: () => sessionData?.url,
+    setXfadeSec: (v) => { xfadeSec = v; },
+    setEqGains: (g) => { eqGains = g; },
+    ensureSite, ensureBrowse, setMode,
+    pollOnce, execCmd, execSite, execOn, applyAudioTo,
+    extractRecs, extractSearchResults, importCookiesSafely,
+    diagReport: collectDiagnostics,
+    blocked: () => blockedCount,
+    blockedSamples: () => blockedSamples.slice(),
+  });
+
+  if (IS_PROBE) probes.runProbe().catch(e => { console.error("probe error:", e?.stack || e); app.exit(1); });
+  if (IS_SPA_PROBE) probes.runProbeSpa().catch(e => { console.error("spa error:", e?.stack || e); app.exit(1); });
 
   // 調査用: メディアパイプラインとネットワークの詳細トレースを記録する。
   // --trace-media で起動し、止まりを再現したら F10 で保存(data/trace-media-*.json)。
@@ -2242,13 +1617,13 @@ app.whenReady().then(async () => {
       setTimeout(save, Number(process.env.MUSICVIEW_TRACE_STOP_MS) || 15000);
     }
   }
-  if (IS_IMPORT_PROBE) runProbeImport().catch(e => { console.error("probe-import error:", e); app.exit(1); });
-  if (IS_DESKTOP_PROBE) runProbeDesktop().catch(e => { console.error("probe-desktop error:", e); app.exit(1); });
-  if (argv.includes("--probe-xfade")) runProbeXfade().catch(e => { console.error("probe-xfade error:", e); app.exit(1); });
-  if (IS_AUDIO_PROBE) runProbeAudio().catch(e => { console.error("probe-audio error:", e); app.exit(1); });
+  if (IS_IMPORT_PROBE) probes.runProbeImport().catch(e => { console.error("probe-import error:", e); app.exit(1); });
+  if (IS_DESKTOP_PROBE) probes.runProbeDesktop().catch(e => { console.error("probe-desktop error:", e); app.exit(1); });
+  if (argv.includes("--probe-xfade")) probes.runProbeXfade().catch(e => { console.error("probe-xfade error:", e); app.exit(1); });
+  if (IS_AUDIO_PROBE) probes.runProbeAudio().catch(e => { console.error("probe-audio error:", e); app.exit(1); });
   if (IS_DISCORD_PROBE) {
     // 本体のシングルロックと無関係に接続テストだけを行う
-    app.whenReady().then(() => runProbeDiscord().catch(e => { console.error("probe-discord error:", e); app.exit(1); }));
+    app.whenReady().then(() => probes.runProbeDiscord().catch(e => { console.error("probe-discord error:", e); app.exit(1); }));
     return;
   }
 });

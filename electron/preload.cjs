@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("musicview", {
   setViz: (on) => ipcRenderer.invoke("mv:set-viz", on),
   getDiscordId: () => ipcRenderer.invoke("mv:dc-id-get"),
   setDiscordId: (id) => ipcRenderer.invoke("mv:dc-id-set", id),
+  saveDiagReport: () => ipcRenderer.invoke("mv:diag-save"),
   onViz: (fn) => ipcRenderer.on("mv:viz", (_e, d) => fn(d)),
   onRecs: (fn) => ipcRenderer.on("mv:recs", (_e, d) => fn(d)),
   onMode: (fn) => ipcRenderer.on("mv:mode", (_e, m) => fn(m)),

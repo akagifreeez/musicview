@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { extractVideoId, mixUrl, watchUrl, searchUrl, thumbUrl } from "../lib/urlutil.mjs";
-import { normalizeQueue, shuffledOrder, nextShuffled } from "../lib/queue.mjs";
+import { normalizeQueue, shuffledOrder, nextShuffled, sanitizeQueue, removeOne, insertAfterOne } from "../lib/queue.mjs";
 import { parseRecResults, parseDomItems, parseQueueItems, parseGenericItems } from "../lib/recs.mjs";
 import { makeSnapshot, validateSnapshot } from "../lib/restore.mjs";
 import { clampGains, isFlat } from "../lib/eq.mjs";
@@ -564,6 +564,11 @@ let desiredRate = 1;
 let xfadeCooldownUntil = 0; // キャンセル直後の再開を抑える(シーク連打などでのチャーン防止)
 let playHistory = [];       // 「前の曲」用の再生履歴(あとから鳴った順・最大50)
 
+// ユーザーが並べ替えたアプリ側キュー(videoId配列)。YouTube プレイヤー自身のキューは
+// 外から並べ替えられないため、ユーザーがキューを触った時点でこちらへ引き取り、
+// 次曲選択(queueNextId)と表示を優先する。null=未操作(プレイヤーのキューに任せる)
+let queueOverride = null;
+
 let userPauseAt = 0;        // ユーザー自身の一時停止操作の時刻
 
 let sleepPauseAt = 0;       // スリープタイマーによる一時停止の時刻
@@ -628,6 +633,13 @@ async function transitionTo(url, opts = {}) {
 function queueNextId(snap) {
   // 現在曲そのものを返すと同じ曲へのクロスフェード無限ループになるため、常に自己排除する
   const pick = (list, from) => list.slice(from).find(id => id && id !== snap.videoId) ?? null;
+  // ユーザーが並べ替えたキューがあればその順序を優先する。現在曲が override に無い
+  // (別の曲へ飛んだ後等)ときは null で従来経路に落とす=キューは放棄した扱い。
+  // override の末端ではラジオ継続フォールバック(曲末進行の radio fallback)に譲る
+  if (Array.isArray(queueOverride) && queueOverride.length) {
+    const i = queueOverride.indexOf(snap.videoId);
+    return i >= 0 ? pick(queueOverride, i + 1) : null;
+  }
   if (Array.isArray(snap.queue) && snap.qIdx >= 0) {
     const n = pick(snap.queue, snap.qIdx + 1);
     if (n) return n;
@@ -639,6 +651,42 @@ function queueNextId(snap) {
     return lastRecsIds.find(id => id !== snap.videoId) ?? null;
   }
   return null;
+}
+
+// ── キュー操作(オーバーライド)──────────────────────
+// 現在のキュー(プレイヤーのキュー → 取得済みキューの順で解決)を引き取る。
+// 未操作の状態で削除/「次に再生」をされたときの下準備
+function seizeQueue() {
+  if (!Array.isArray(queueOverride)) {
+    const snap = lastSnap?.snap;
+    const base = Array.isArray(snap?.queue) ? snap.queue
+      : (Array.isArray(lastQueueIds) ? lastQueueIds : null);
+    if (!base) return false;
+    queueOverride = sanitizeQueue(base);
+  }
+  return queueOverride.length > 0;
+}
+
+function queueReorderIds(ids) {
+  const clean = sanitizeQueue(ids);
+  if (!clean.length) return false;
+  queueOverride = clean;
+  return true;
+}
+
+function queueRemoveId(id) {
+  if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{11}$/.test(id)) return false;
+  if (!seizeQueue()) return false;
+  queueOverride = removeOne(queueOverride, id);
+  return true;
+}
+
+function queuePlayNextId(id) {
+  if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{11}$/.test(id)) return false;
+  if (!seizeQueue()) return false;
+  const cur = lastSnap?.snap?.videoId;
+  queueOverride = insertAfterOne(queueOverride, cur, id);
+  return true;
 }
 
 // ── 前/次の曲 ──────────────────────────────────
@@ -1090,8 +1138,10 @@ async function pollOnce() {
   resolveTitles(snap.queue ?? [snap.videoId]);
 
   // プレイヤー API にキューが無いときはプレイリストパネル抽出で代用する
+  // (ユーザーが並べ替えた override がある間は推定を挟まない)
   let queueEstimated = false;
-  if (!Array.isArray(snap.queue) && Array.isArray(lastQueueIds) && lastQueueIds.length > 1) {
+  if (!Array.isArray(snap.queue) && !(Array.isArray(queueOverride) && queueOverride.length)
+    && Array.isArray(lastQueueIds) && lastQueueIds.length > 1) {
     snap.queue = lastQueueIds;
     snap.qIdx = lastQueueIds.indexOf(snap.videoId);
     queueEstimated = true;
@@ -1099,7 +1149,10 @@ async function pollOnce() {
 
   // 復元設定(音量・速度)は desiredVol/desiredRate 経由で遷移ごとに当たるため個別処理は不要
 
-  const q = normalizeQueue(snap);
+  const q = (Array.isArray(queueOverride) && queueOverride.length) ? queueOverride : normalizeQueue(snap);
+  const historyIds = playHistory.slice(-50).reverse(); // 履歴は新しい順で見せる
+  resolveTitles(historyIds);
+  const queueIsOverride = Array.isArray(queueOverride) && queueOverride.length > 0;
   const result = {
     ok: true,
     mode,
@@ -1107,6 +1160,7 @@ async function pollOnce() {
     ad: !!snap.ad,
     snap,
     queueEstimated,
+    queueOverride: queueIsOverride,
     xfadeSec,
     loopOn,
     xfading: !!xfade,
@@ -1115,6 +1169,7 @@ async function pollOnce() {
     discord: discordClient?.connected ? "on" : (discordClient ? "off" : "no-id"),
     thumb: thumbUrl(snap.videoId, "maxres"),
     queueItems: q.map(id => ({ id, title: titles.get(id)?.title ?? null, author: titles.get(id)?.author ?? null })),
+    historyItems: historyIds.map(id => ({ id, title: titles.get(id)?.title ?? null, author: titles.get(id)?.author ?? null })),
   };
   lastSnap = result;
   tickXfade().catch(() => {}); // クロスフェード進行(フェード中はこちらの 150ms 基調が担う)
@@ -1398,6 +1453,12 @@ function registerIpc() {
   ipcMain.handle("mv:prev", () => goPrev());
   ipcMain.handle("mv:next", () => goNext());
 
+  // キュー操作(アプリ側オーバーライド)。並べ替えた順序が次曲選択と表示の両方に効く
+  ipcMain.handle("mv:queue-reorder", (_e, ids) => queueReorderIds(ids));
+  ipcMain.handle("mv:queue-remove", (_e, id) => queueRemoveId(id));
+  ipcMain.handle("mv:queue-play-next", (_e, id) => queuePlayNextId(id));
+  ipcMain.handle("mv:queue-clear", () => { queueOverride = null; return true; });
+
   // 診断レポートの書き出し(保存先はユーザーが選ぶ。保存後にフォルダを開く)
   ipcMain.handle("mv:diag-save", async () => {
     try {
@@ -1589,6 +1650,10 @@ app.whenReady().then(async () => {
     diagReport: collectDiagnostics,
     blocked: () => blockedCount,
     blockedSamples: () => blockedSamples.slice(),
+    queueReorder: queueReorderIds,
+    queueRemove: queueRemoveId,
+    queuePlayNext: queuePlayNextId,
+    queueClear: () => { queueOverride = null; },
   });
 
   if (IS_PROBE) probes.runProbe().catch(e => { console.error("probe error:", e?.stack || e); app.exit(1); });

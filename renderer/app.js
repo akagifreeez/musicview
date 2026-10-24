@@ -19,6 +19,7 @@ const els = {
   loop: $("loop"), shuffle: $("shuffle"), mix: $("mix"),
   tabQueue: $("tab-queue"), tabRecs: $("tab-recs"),
   recsKind: $("recs-kind"), recsBody: $("recs-body"),
+  histBtn: $("hist-btn"), queueNote: $("queue-note"), queueHeadLabel: $("queue-head-label"),
 };
 
 let mode = "music";
@@ -302,26 +303,39 @@ function render() {
 }
 
 // ── キュー表示 ────────────────────────────────
+let showHistory = false;   // キュー領域を再生履歴(新しい順)に切り替える
+let queueDragging = false; // ドラッグ中は 500ms の再構築を止める(止めないとドラッグが壊れる)
+
 function renderQueue(p) {
-  const items = snap.queueItems ?? [];
   const box = els.tabQueue;
-  if (!items.length || items.length === 1 && items[0].id === p.videoId && !p.queue) {
+  if (showHistory) return renderHistory(box);
+  if (queueDragging) return; // ドラッグ中は触らない
+  const items = snap.queueItems ?? [];
+  const isOverride = !!snap.queueOverride;
+  if (!items.length || items.length === 1 && items[0].id === p.videoId && !p.queue && !isOverride) {
     box.innerHTML = `<div class="placeholder">単発再生中(キューなし)<br>「この曲からミックス」でラジオが続く</div>`;
     return;
   }
-  const curIdx = Array.isArray(p.queue) ? p.queue.indexOf(p.videoId) : 0;
   let html = "";
   items.forEach((it, i) => {
     const cur = it.id === p.videoId ? " cur" : "";
     const t = it.title ? esc(it.title) : `<span class="row-id">${esc(it.id)}</span>`;
-    const sub = esc(it.author || (i === curIdx ? "再生中" : ""));
-    html += `<div class="row${cur}" data-id="${it.id}" data-i="${p.queue ? p.queue.indexOf(it.id) : i}">
+    const sub = esc(it.author || (it.id === p.videoId ? "再生中" : ""));
+    // プレイヤー本体にキューがあるなら playAt のインデックス、それ以外(override/推定)は
+    // 直接 load で飛ぶ(クリック処理も同じ分岐)
+    const idx = (isOverride || snap.queueEstimated || !Array.isArray(p.queue)) ? i : p.queue.indexOf(it.id);
+    html += `<div class="row${cur}" data-id="${it.id}" data-i="${idx}" draggable="true">
+      <span class="row-drag" title="ドラッグで並べ替え">≡</span>
       <img class="row-thumb" loading="lazy" src="https://i.ytimg.com/vi/${it.id}/default.jpg" alt="">
       <div class="row-main"><div class="row-title">${t}</div><div class="row-sub">${sub}</div></div>
+      <button class="row-del" data-del="${it.id}" title="キューから削除">×</button>
       <button class="row-mix" data-mix="${it.id}" title="この曲からミックス">♫</button>
     </div>`;
   });
   box.innerHTML = html;
+  els.queueNote.textContent = isOverride ? " — 並べ替え済み" : "";
+  els.queueNote.title = isOverride ? "クリックで元のキュー順に戻す" : "";
+  els.queueNote.classList.toggle("undoable", isOverride);
   // 曲が変わった時だけ再生中の行へスクロールする(毎renderやると手動スクロールを奪う)
   const curRow = box.querySelector(".row.cur");
   if (curRow && p.videoId !== queueScrolledVid) {
@@ -330,7 +344,67 @@ function renderQueue(p) {
   }
 }
 
+// 再生履歴(新しい順)。行クリックでその曲へ戻る
+function renderHistory(box) {
+  const items = snap.historyItems ?? [];
+  if (!items.length) {
+    box.innerHTML = `<div class="placeholder">履歴はまだ無い<br>曲を聴くとここに積まれます</div>`;
+    return;
+  }
+  box.innerHTML = items.map(it => `<div class="row" data-id="${it.id}">
+      <img class="row-thumb" loading="lazy" src="https://i.ytimg.com/vi/${it.id}/default.jpg" alt="">
+      <div class="row-main"><div class="row-title">${it.title ? esc(it.title) : `<span class="row-id">${esc(it.id)}</span>`}</div><div class="row-sub">${esc(it.author ?? "")}</div></div>
+      <button class="row-mix" data-mix="${it.id}" title="この曲からミックス">♫</button>
+    </div>`).join("");
+  els.queueNote.textContent = " — 履歴";
+}
+
+// キューのドラッグ並べ替え(HTML5 DnD)。決定した順序をメインへ送り、
+// 次曲選択がその順序に従う(override はここで初めて生える)
+let dragRowEl = null;
+els.tabQueue.addEventListener("dragstart", (e) => {
+  const row = e.target.closest(".row");
+  if (!row || !row.draggable) return;
+  queueDragging = true;
+  dragRowEl = row;
+  row.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", row.dataset.id);
+});
+els.tabQueue.addEventListener("dragover", (e) => {
+  if (!queueDragging) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+});
+els.tabQueue.addEventListener("drop", (e) => {
+  if (!queueDragging || !dragRowEl) return;
+  e.preventDefault();
+  const target = e.target.closest(".row");
+  if (target && target !== dragRowEl) {
+    const ids = [...els.tabQueue.querySelectorAll(".row")].map(r => r.dataset.id);
+    const from = ids.indexOf(dragRowEl.dataset.id);
+    let to = ids.indexOf(target.dataset.id);
+    if (from >= 0 && to >= 0) {
+      ids.splice(from, 1);
+      if (to > from) to -= 1; // 除去で前詰めになった分を詰める
+      ids.splice(to, 0, dragRowEl.dataset.id);
+      window.musicview.queueReorder(ids);
+    }
+  }
+});
+els.tabQueue.addEventListener("dragend", () => {
+  queueDragging = false;
+  dragRowEl?.classList.remove("dragging");
+  dragRowEl = null;
+  render(); // 確定した順序をすぐ反映
+});
+
 els.tabQueue.addEventListener("click", (e) => {
+  const delBtn = e.target.closest(".row-del");
+  if (delBtn) {
+    window.musicview.queueRemove(delBtn.dataset.del);
+    return;
+  }
   const mixBtn = e.target.closest(".row-mix");
   if (mixBtn) {
     window.musicview.openRec(mixBtn.dataset.mix, true);
@@ -338,9 +412,31 @@ els.tabQueue.addEventListener("click", (e) => {
   }
   const row = e.target.closest(".row");
   if (!row) return;
-  // プレイヤー本体にキューがあるならインデックス指定、推定キューなら直接読み込み
-  if (snap?.queueEstimated) window.musicview.cmd("load", row.dataset.id);
+  // 履歴・override・推定キューは直接 load、プレイヤー本体のキューはインデックス指定
+  if (showHistory || snap?.queueEstimated || snap?.queueOverride) window.musicview.cmd("load", row.dataset.id);
   else window.musicview.cmd("playAt", Number(row.dataset.i));
+});
+
+// 履歴切替(キュー領域を履歴リストに差し替える)
+els.histBtn.addEventListener("click", () => {
+  showHistory = !showHistory;
+  els.histBtn.textContent = showHistory ? "キューへ" : "履歴";
+  if (!showHistory) {
+    els.queueNote.textContent = snap?.queueOverride ? " — 並べ替え済み" : "";
+    els.queueNote.title = snap?.queueOverride ? "クリックで元のキュー順に戻す" : "";
+    els.queueNote.classList.toggle("undoable", !!snap?.queueOverride);
+  }
+  render();
+});
+
+// 「並べ替え済み」ラベルを押すとオーバーライドを解除して元のキュー順に戻す
+els.queueNote.addEventListener("click", async () => {
+  if (!snap?.queueOverride) return;
+  await window.musicview.queueClear();
+  els.queueNote.textContent = "";
+  els.queueNote.title = "";
+  els.queueNote.classList.remove("undoable");
+  render();
 });
 
 // ── おすすめ表示 ───────────────────────────────
@@ -354,11 +450,20 @@ window.musicview.onRecs(({ kind, query, items }) => {
       <img class="row-thumb" loading="lazy" src="https://i.ytimg.com/vi/${it.id}/default.jpg" alt="">
       <div class="row-main"><div class="row-title">${esc(it.title)}</div><div class="row-sub">${esc(it.author)}</div></div>
       ${it.len ? `<span class="row-len">${fmt(it.len)}</span>` : ""}
+      <button class="row-next" data-next="${it.id}" title="次に再生(今の曲の直後に割り込む)">⤵</button>
       <button class="row-mix" data-mix="${it.id}" title="この曲からミックス">♫</button>
     </div>`).join("");
 });
 
 els.tabRecs.addEventListener("click", (e) => {
+  const nextBtn = e.target.closest(".row-next");
+  if (nextBtn) {
+    window.musicview.queuePlayNext(nextBtn.dataset.next).then(ok => {
+      nextBtn.textContent = ok ? "✓" : "⤵";
+      setTimeout(() => { nextBtn.textContent = "⤵"; }, 1200);
+    });
+    return;
+  }
   const mixBtn = e.target.closest(".row-mix");
   if (mixBtn) {
     window.musicview.openRec(mixBtn.dataset.mix, true);

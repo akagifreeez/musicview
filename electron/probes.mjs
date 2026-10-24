@@ -122,6 +122,48 @@ async function runProbe() {
       (s1?.snap?.videoId !== s0?.snap?.videoId && s2?.snap?.videoId === s0?.snap?.videoId) ? "ROUNDTRIP-OK" : "CHECK");
   } catch (e) { log("prev-next err:", e.message); }
 
+  // キュー操作(アプリ側オーバーライド)のE2E: 次に再生・削除・並べ替えの反映と履歴。
+  // メイン側の関数を直接叩く(DnD は DOM 操作なので、ここでは順序反映を検証する)。
+  // mix のキューが接続されているこの時点で走す(後半は単発再生になりキューが消える)
+  try {
+    const base = await pollOnce();
+    const items = base?.queueItems ?? [];
+    if (items.length >= 3 && base?.snap?.videoId) {
+      const ids = items.map(it => it.id);
+      const cur = base.snap.videoId;
+      // 1) 次に再生: 末尾の曲が現在曲の直後に割り込む
+      const moved = ids[ids.length - 1];
+      const r1 = await ctx.queuePlayNext(moved);
+      const o1 = ((await pollOnce())?.queueItems ?? []).map(it => it.id);
+      const ci1 = o1.indexOf(cur);
+      const okNext = r1 && o1[ci1 + 1] === moved;
+      // 2) 削除: 割り込ませた曲を消す
+      const r2 = await ctx.queueRemove(moved);
+      const o2 = ((await pollOnce())?.queueItems ?? []).map(it => it.id);
+      const okRemove = r2 && !o2.includes(moved);
+      // 3) 並べ替え: 先頭2つを入れ替えた順序を送り、表示がそれに従う
+      const swapped = o2.slice();
+      [swapped[0], swapped[1]] = [swapped[1], swapped[0]];
+      const r3 = await ctx.queueReorder(swapped);
+      const o3 = ((await pollOnce())?.queueItems ?? []).map(it => it.id);
+      const okReorder = r3 && o3[0] === swapped[0] && o3[1] === swapped[1];
+      // 4) 履歴: 別の曲へ飛んで(playHistory は poll の videoId 変化で積まれる)、
+      //    新しい順の historyItems を確認する
+      const pre = base.snap.videoId;
+      await execCmd("load", swapped[0] !== pre ? swapped[0] : swapped[1]);
+      await sleep(3500);
+      const histSnap = await pollOnce();
+      const hist = (histSnap?.historyItems ?? []).length;
+      const histOk = hist > 0 && histSnap.historyItems[0].id === pre;
+      // 5) 並べ替え前の順序に戻す(テストがキューを壊さないように)
+      await ctx.queueReorder(o2);
+      log("queue-ops:", okNext && okRemove && okReorder ? "OVERRIDE-OK" : `CHECK next=${okNext} remove=${okRemove} reorder=${okReorder}`,
+        "history:", hist, histOk ? "(newest-first-OK)" : "(CHECK)");
+    } else {
+      log("queue-ops: skip (キューが短い)");
+    }
+  } catch (e) { log("queue-ops err:", e.message); }
+
   // fetch ラッパが詰まらないこと(サイト画面で動画クリック時に読み込みが止まる回帰)。
   // 実エンドポイントへの POST は YouTube 側の判断で 400 系になるが、約束が解決して
   // 応答オブジェクトを受け取れればパイプは健全
@@ -247,6 +289,7 @@ async function runProbe() {
     })()`);
     log("hit-test:", JSON.stringify(hit));
   } catch (e) { log("hit-test err:", e.message); }
+
 
   // EQボタンの新挙動(E2E): クリック=ON/OFF(赤化)・右クリック=パネル。
   // プリセット適用→ボタンが赤くなる→パネルの折り返し含めてスクショで確認

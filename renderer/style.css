@@ -201,13 +201,30 @@ body[data-mode="site"] #stage { display: none; }
 
 .side-head {
   flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--label-secondary);
   padding: 12px 14px 6px;
 }
-.side-head em { font-style: normal; font-weight: 400; color: var(--label-tertiary); }
+.side-head em { font-style: normal; font-weight: 400; color: var(--label-tertiary); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-head em.undoable { cursor: pointer; }
+.side-head em.undoable:hover { color: var(--label-primary); text-decoration: underline; }
+.side-btn {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--label-secondary);
+  cursor: pointer;
+  transition: background var(--duration) var(--ease), color var(--duration) var(--ease);
+}
+.side-btn:hover { background: rgba(255, 255, 255, 0.15); color: var(--label-primary); }
 
 #tab-queue {
   flex: 0 1 auto;
@@ -266,6 +283,43 @@ body[data-mode="site"] #stage { display: none; }
   transition: all var(--duration) var(--ease);
 }
 .row-mix:hover { background: var(--accent-soft); color: var(--accent); }
+
+/* キュー操作(ドラッグ並べ替え/削除)と「次に再生」 */
+.row-drag {
+  flex: none;
+  cursor: grab;
+  color: var(--label-tertiary);
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+  opacity: 0.5;
+}
+.row:hover .row-drag { opacity: 1; }
+.row.dragging { opacity: 0.4; }
+
+.row-del {
+  flex: none;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--label-tertiary);
+  font-size: 14px;
+  opacity: 0;
+  transition: all var(--duration) var(--ease);
+}
+.row:hover .row-del { opacity: 0.7; }
+.row-del:hover { opacity: 1; background: rgba(255, 255, 255, 0.12); color: var(--label-primary); }
+
+.row-next {
+  flex: none;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--label-tertiary);
+  font-size: 13px;
+  transition: all var(--duration) var(--ease);
+}
+.row-next:hover { background: rgba(255, 255, 255, 0.12); color: var(--label-primary); }
 
 /* ── プレイヤー面 ── */
 #player {

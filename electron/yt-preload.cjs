@@ -9,7 +9,13 @@
 // 統計は window.__mvPrune に置き、probe から実走確認できるようにする。
 // 配線は installHooks(差し込み先)に括り出してあり、Node のテストからも同じ経路を
 // 回帰テストできる(実機でしか起きないバグをここで潰す)
-const { prunePlayerResponse } = require("../lib/ytprune.cjs");
+let prunePlayerResponse = () => 0;
+try {
+  ({ prunePlayerResponse } = require("../lib/ytprune.cjs"));
+} catch (e) {
+  // モジュール解決に失敗しても preload 自体は生かす(広告カットは諦める)
+  try { console.error("yt-preload: prune module unavailable:", e.message); } catch (e2) {}
+}
 
 function installHooks(env, opts) {
   const win = env.window;

@@ -127,7 +127,7 @@ export const SITE_BOOTSTRAP = `
         } else {
           el.loadVideoById(vid);
         }
-      }(arg);
+      }
       else if (name === "teardownAudio") { hardTeardown(); window.__mvAudioDisabled = true; return "ok"; }
       else return "unknown";
       return "ok";

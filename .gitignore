@@ -5,3 +5,5 @@ release/
 Trace-*.json.gz
 data/trace-media-*.json
 media-analysis.txt
+# リリース作業用スクリプト(トークンは環境変数で渡す・本体は将来の添付作業の代替手段として残す)
+tools/forgejo-upload.mjs

@@ -1588,6 +1588,8 @@ async function runProbe() {
           return {
             href: location.href.slice(0, 90),
             vid: s.videoId || null,
+          q: Array.isArray(s.queue) ? s.queue.length : null,
+          q1: Array.isArray(s.queue) ? s.queue[1] : null,
             state: s.state ?? null,
             ad: !!document.querySelector(".ad-showing"),
             spinner: !!document.querySelector(".ytp-spinner, tp-yt-paper-spinner.active"),
@@ -1788,6 +1790,7 @@ async function runProbeSpa() {
       return {
         href: location.href.slice(0, 80),
         vid: s.videoId || null,
+        q: (window.__mvCtl && window.__mvCtl.snap() && window.__mvCtl.snap().queue) ? window.__mvCtl.snap().queue.length : null,
         state: s.state ?? null,
         ad: !!document.querySelector(".ad-showing"),
         spinner: sp ? !sp.hasAttribute("hidden") : false,

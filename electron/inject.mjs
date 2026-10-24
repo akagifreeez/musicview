@@ -117,14 +117,17 @@ export const SITE_BOOTSTRAP = `
         // ミックス/プレイリスト付きで投入する(loadVideoById はプレイリストを切り
         // 離すため、曲末の自動進行が死ぬ。list を再接続して自然進行を保つ)
         var o = typeof arg === "string" ? JSON.parse(arg) : (arg || {});
+        // プレイリスト付きで投入する。クリック動画がシードのラジオ(RD<動画ID>)なら
+        // loadVideoById のオブジェクト形式で list を渡すとキューが再接続される
+        // (実走 q:25 確認)。シード不一致のリストは動画のみ投入(進行はアプリの安全網)
+        var vid = String(o.videoId || "");
         var lst = String(o.list || "");
         if (/^(RD|PL|OL|UL|FL|LL|WL)/.test(lst)) {
-          el.loadVideoById({ videoId: String(o.videoId), listType: "playlist", list: lst });
+          el.loadVideoById({ videoId: vid, listType: "playlist", list: lst });
         } else {
-          el.loadVideoById(String(o.videoId));
+          el.loadVideoById(vid);
         }
-      }
-      else if (name === "eq") return ctlEq(arg);
+      }(arg);
       else if (name === "teardownAudio") { hardTeardown(); window.__mvAudioDisabled = true; return "ok"; }
       else return "unknown";
       return "ok";

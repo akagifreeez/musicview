@@ -546,6 +546,7 @@ let sleepPauseAt = 0;       // スリープタイマーによる一時停止の�
 let lastNavKickAt = 0;
 let watchLastTime = -1;     // 再生位置の停滞監視用(15秒停滞でストリーム取り直し)
 let watchStallSince = 0;
+let watchStallCount = 0;   // 連続停滞回数(同動画2回でページ再取得に格上げ)
 let vizPump = null;
 let eqGains = [0, 0, 0, 0, 0]; // 5バンドEQ(60Hz lowshelf が CLEAR BASS 相当)
 let vizOn = true;       // ビジュアライザー(解析値をUIへ送って描画)
@@ -934,6 +935,19 @@ async function pollOnce() {
     await execCmd("vol", desiredVol);
   }
 
+  // 曲末の自動進行(クロスフェードOFF時の安全網)。loadVideoById はプレイリストを
+  // 切り離すため、ネイティブ自動進行が働かないケースをここで拾う。
+  // キューの全ソースが空でもラジオ継続(mixUrl)で停止させない
+  if (xfadeSec <= 0 && !loopOn && snap.state === 0 && Date.now() > xfadeCooldownUntil) {
+    const nextId = queueNextId(snap);
+    const target = (nextId && nextId !== snap.videoId) ? nextId : snap.videoId;
+    if (target) {
+      console.log("musicview: end-of-track advance ->", target, nextId ? "(queue)" : "(radio fallback)");
+      site.webContents.loadURL(mixUrl(target));
+      lastSiteNavAt = Date.now();
+    }
+  }
+
   // ユーザーが画面内遷移した直後は「遷移先を再生」が目的。YouTubeのSPA交換は
   // 旧曲の状態次第で発火しないことがあり(一時停止中のクリックで新動画が永久に
   // cueされない/再生中のクリックでは旧曲の終了まで遅延する実走確認)、待っていても
@@ -945,38 +959,56 @@ async function pollOnce() {
       if (uv && /^[a-zA-Z0-9_-]{11}$/.test(uv) && uv !== snap.videoId) {
         if (Date.now() - lastNavKickAt > 4000) {
           lastNavKickAt = Date.now();
-          console.log("musicview: post-nav force load", uv, "(player stuck on", snap.videoId + ")");
-          await execCmd("load", uv);
+          const list = new URL(site.webContents.getURL()).searchParams.get("list");
+          if (list && /^(RD|PL|OL|UL|FL|LL)/.test(list)) {
+            // list を再接続した形で投入(loadVideoById 単体だとプレイリストが切り
+            // 離され、曲末の自動進行が死ぬ=次の曲へ進まなくなる)
+            console.log("musicview: post-nav force load", uv, "with list", list.slice(0, 24));
+            await execCmd("loadlist", { videoId: uv, list });
+          } else {
+            console.log("musicview: post-nav force load", uv, "(player stuck on", snap.videoId + ")");
+            await execCmd("load", uv);
+          }
           if (snap.state === 2) await execCmd("play");
-        }
+}
       }
     } catch { /* URL取得失敗は無視 */ }
   }
 
-  // 再生/バッファ中に位置が15秒停滞 = SABR初手ストリームの空振り(メインブラウザの
-  // Floorpでも同一現象を確認・F5で2.9秒回復)。同じURLを作り直してストリームを
-  // 取り直すのがF5相当の自己回復。一時停止(2)は停滞が正常なので対象外
+  // 再生/バッファ中に位置が15秒停滞 = SABR初手/セグメント要求の空振り
+  // (メインブラウザのFloorpでも同一現象・F5で即回復)。回復は位置を保持する:
+  // 同動画のストリームを取り直して停滞位置から再開し、2回だめならページを作り直す。
+  // 一時停止(2)は停滞が正常なので対象外
   if (snap.state === 1 || snap.state === 3) {
     const t = Number(snap.time) || 0;
     if (Math.abs(t - watchLastTime) < 0.5) {
       if (!watchStallSince) watchStallSince = Date.now();
-      else if (Date.now() - watchStallSince > 15000 && !IS_ANY_PROBE) {
-        try {
-          const u = site.webContents.getURL();
-          if (u && u !== "about:blank" && !site.webContents.isLoading()) {
-            console.log("musicview: playback frozen 15s, stream re-acquire reload");
-            watchStallSince = Date.now();
-            watchLastTime = t;
-            site.webContents.loadURL(u);
-          }
-        } catch { /* 無視 */ }
+      else if (Date.now() - watchStallSince > 15000) {
+        watchStallSince = Date.now();
+        const vid = snap.videoId;
+        if (watchStallCount < 2) {
+          watchStallCount++;
+          console.log("musicview: playback frozen 15s, re-acquire stream", vid, "@", Math.round(t), "try", watchStallCount);
+          watchLastTime = -1;
+          execCmd("load", vid).catch(() => {}).then(async () => {
+            await sleep(1500);
+            await execCmd("seek", t).catch(() => {});
+            await execCmd("play").catch(() => {});
+          });
+        } else {
+          console.log("musicview: playback frozen after retries, page re-acquire");
+          watchStallCount = 0;
+          try { site.webContents.loadURL(site.webContents.getURL()); } catch (e) {}
+        }
       }
     } else {
       watchStallSince = 0;
+      watchStallCount = 0;
       watchLastTime = t;
     }
   } else {
     watchStallSince = 0;
+    watchStallCount = 0;
     watchLastTime = -1;
   }
 
@@ -1376,7 +1408,7 @@ async function runProbe() {
 
   // 可視性スプーフ+再生キックで非表示のまま流れ始めるかを観察
   let snap = null;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 12; i++) {
     await sleep(3000);
     snap = await pollOnce();
     const p = snap?.snap;
@@ -1820,6 +1852,22 @@ async function runProbeSpa() {
     else { stalls++; log(`round${r}: STALL(40秒で再生に至らず) acErr=${acCount.n}`); }
   }
   log(`RESULT: ok=${okays} stall=${stalls} audioContextErr累計=${acCount.n}`);
+
+  // 曲末自動進行の検証: 今の曲を末尾5秒へシークし、次の動画へ自動で進むか
+  try {
+    const before = (await pollOnce())?.snap;
+    if (before && before.state === 1 && before.dur > 30) {
+      await execCmd("seek", Math.max(0, before.dur - 5));
+      log("end-advance: seek to", Math.round(before.dur - 5), "/", Math.round(before.dur), "vid", before.videoId);
+      for (let i = 0; i < 16; i++) {
+        await sleep(2000);
+        const st = await pollOnce();
+        const v = st?.snap?.videoId, t = Math.round(st?.snap?.time ?? -1), stt = st?.snap?.state;
+        log(`  end-advance +${(i + 1) * 2}s: vid=${v} state=${stt} t=${t}`);
+        if (v && v !== before.videoId && stt === 1) { log("end-advance: ADVANCED-OK ->", v); break; }
+      }
+    }
+  } catch (e) { log("end-advance err:", e.message); }
   wc.removeListener("console-message", onConsole);
   app.exit(0);
 }

@@ -82,6 +82,17 @@ export const SITE_BOOTSTRAP = `
       else if (name === "prev") el.previousVideo();
       else if (name === "playAt") el.playVideoAt(Number(arg) || 0);
       else if (name === "load") el.loadVideoById(String(arg));
+      else if (name === "loadlist") {
+        // ミックス/プレイリスト付きで投入する(loadVideoById はプレイリストを切り
+        // 離すため、曲末の自動進行が死ぬ。list を再接続して自然進行を保つ)
+        var o = typeof arg === "string" ? JSON.parse(arg) : (arg || {});
+        var lst = String(o.list || "");
+        if (/^(RD|PL|OL|UL|FL|LL|WL)/.test(lst)) {
+          el.loadVideoById({ videoId: String(o.videoId), listType: "playlist", list: lst });
+        } else {
+          el.loadVideoById(String(o.videoId));
+        }
+      }
       else if (name === "eq") return ctlEq(arg);
       else if (name === "teardownAudio") { hardTeardown(); window.__mvAudioDisabled = true; return "ok"; }
       else return "unknown";

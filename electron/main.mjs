@@ -277,6 +277,27 @@ function makeYouTubeView() {
     }, 1500);
   });
   wc.on("dom-ready", () => injectInto(wc));
+  // 骨格ページ(起動に失敗してコンテンツ要素が生えない)の自動リロード。
+  // 4秒後に内容要素を確認し、無ければ F5 相当を最大2回まで当てる
+  wc.on("dom-ready", () => {
+    setTimeout(async () => {
+      try {
+        if (wc.isDestroyed() || wc.isLoading()) return;
+        const ok = await wc.executeJavaScript(
+          '!!document.querySelector("ytd-watch-flexy, ytd-rich-item-renderer, yt-lockup-view-model, ytd-browse, ytd-search, ytd-video-renderer") || (document.body && document.body.innerText.length > 40)',        );
+        if (ok) {
+          skeletonReloads.delete(wc.id);
+          return;
+        }
+        const n = skeletonReloads.get(wc.id) || 0;
+        if (n < 2 && !wc.isLoading()) {
+          skeletonReloads.set(wc.id, n + 1);
+          console.log("musicview: skeletal page, auto-reload", n + 1);
+          wc.reload();
+        }
+      } catch { /* 無視 */ }
+    }, 4000);
+  });
   // 主役ビューの遷移だけ曲追跡をリセットする(退避ビューの遷移では触れない)。
   // ユーザーが画面内で遷移した=意図が変わったので、進行中のクロスフェードは打ち切る
   // (放置すると待機ビューが裏で完走し、クリックした曲と無関係な交代/駐車が起きる)
@@ -547,6 +568,7 @@ let lastNavKickAt = 0;
 let watchLastTime = -1;     // 再生位置の停滞監視用(15秒停滞でストリーム取り直し)
 let watchStallSince = 0;
 let watchStallCount = 0;   // 連続停滞回数(同動画2回でページ再取得に格上げ)
+const skeletonReloads = new Map(); // 骨格ページ自動リロードの回数(ビューごと)
 let vizPump = null;
 let eqGains = [0, 0, 0, 0, 0]; // 5バンドEQ(60Hz lowshelf が CLEAR BASS 相当)
 let vizOn = true;       // ビジュアライザー(解析値をUIへ送って描画)
@@ -2129,6 +2151,26 @@ app.whenReady().then(async () => {
   eqGains = sessionData?.eq ?? [0, 0, 0, 0, 0];
   vizOn = sessionData?.viz !== false;
   registerIpc();
+  // YouTube ドキュメント応答から CSP(Trusted Types 強制を含む)を外す。
+  // Electron 環境だと YouTube の起動スクリプトが TT 違反の eval を踏み、
+  // ポリマーの初期化が死んで骨格ページ(フィード/キューUIが空)になるため
+  if (!ADBLOCK_OFF) {
+    session.fromPartition(PARTITION).webRequest.onHeadersReceived(
+      { urls: ["https://www.youtube.com/*"] },
+      (details, callback) => {
+        if (details.resourceType !== "mainFrame") return callback({});
+        // responseHeaders は { 名前: [値, ...] } のオブジェクトマップ
+        const headers = details.responseHeaders || {};
+        const out = {};
+        for (const name of Object.keys(headers)) {
+          if (/^content-security-policy(-report-only)?$/i.test(name)) continue;
+          out[name] = headers[name];
+        }
+        callback({ responseHeaders: out });
+      },
+    );
+  }
+
   if (ADBLOCK_OFF) {
     console.log("musicview: adblock OFF (MUSICVIEW_NO_ADBLOCK=1)");
   } else {

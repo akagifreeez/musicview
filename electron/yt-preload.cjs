@@ -54,9 +54,16 @@ function installHooks(env, opts) {
       const hooked = function (text, reviver) {
         const obj = op.call(win.JSON, text, reviver);
         try {
-          if (obj && typeof obj === "object" && !Array.isArray(obj)
-            && (obj.adPlacements !== undefined || obj.playerAds !== undefined || obj.adSlots !== undefined)) {
-            stats.parse += prunePlayerResponse(obj);
+          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+            // 診断: プレイヤー応答らしいパース結果のルートキーと広告っぽいキーを記録
+            if (obj.streamingData !== undefined || obj.playabilityStatus !== undefined) {
+              stats.lastRootKeys = Object.keys(obj).join(",");
+              const adKeys = Object.keys(obj).filter((k) => /ad/i.test(k));
+              if (adKeys.length) stats.lastAdKeys = adKeys.join(",");
+            }
+            if (obj.adPlacements !== undefined || obj.playerAds !== undefined || obj.adSlots !== undefined) {
+              stats.parse += prunePlayerResponse(obj);
+            }
           }
         } catch (e) { stats.err++; }
         return obj;

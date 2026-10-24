@@ -9,17 +9,48 @@ export const SITE_BOOTSTRAP = `
     var el = p();
     return !!(el && el.classList && el.classList.contains("ad-showing"));
   };
-  // 広告対策。スキップ可能な広告はボタンを押す公式経路だけ使う(強制シークとの競合が
-  // プレイヤーの遷移を壊す元)。スキップ不可の広告だけ出現6秒後に尻切れにする。
-  // 押下直後は遷移中なので動画に触らない(本体動画を誤シークして曲が飛ぶ事故止め)
+  // 広告対策。SABR時代の広告は応答からは消せない(サーバー側でストリームに
+  // 組み込まれる)ため、「見せない・聞かせない・最短で飛ばす」に徹する:
+  //  開始即ミュート → スキップボタンがあれば押す → 2.5秒から尻切りを試みる →
+  //  終了でミュート解除。押下直後の遷移中には触らない(本体誤シーク防止)
   var adSeenAt = 0;
   var skipClickedAt = 0;
   var adSeekAt = 0;
+  var adMuted = false;
+  var adPrevVol = 100;
+  var adQuietTicks = 0;
   var skipTick = function () {
     try {
-      if (!adVisible()) { adSeenAt = 0; return; }
+      if (!adVisible()) {
+        adSeenAt = 0;
+        // 広告明け: 広告中にミュートしていたら2Tick確認して解除
+        if (adMuted) {
+          adQuietTicks++;
+          if (adQuietTicks >= 2) {
+            adMuted = false;
+            adQuietTicks = 0;
+            try { var p2 = p(); if (p2) { if (p2.setVolume) p2.setVolume(adPrevVol); if (p2.unMute) p2.unMute(); } } catch (e) {}
+          }
+        } else {
+          adQuietTicks = 0;
+        }
+        return;
+      }
+      adQuietTicks = 0;
       var now = Date.now();
-      if (!adSeenAt) adSeenAt = now;
+      if (!adSeenAt) {
+        adSeenAt = now;
+        // 開始即ミュート(音を聞かせない)
+        try {
+          var p0 = p();
+          if (p0) {
+            adPrevVol = p0.getVolume ? p0.getVolume() : 100;
+            if (p0.setVolume) p0.setVolume(0);
+            if (p0.mute) p0.mute();
+            adMuted = true;
+          }
+        } catch (e) {}
+      }
       var close = document.querySelector(".ytp-ad-overlay-close-button");
       if (close) { try { close.click(); } catch (e) {} }
       if (now - skipClickedAt < 2500) return;
@@ -29,15 +60,15 @@ export const SITE_BOOTSTRAP = `
         skipClickedAt = now;
         return;
       }
-      if (now - adSeenAt < 6000 || now - adSeekAt < 1500) return;
+      // スキップボタンの無い広告: 出現2.5秒以降、1秒間隔で尻切りを試みる
+      if (now - adSeenAt < 2500 || now - adSeekAt < 1000) return;
       var v = document.querySelector("video.html5-main-video");
       if (v && v.duration && isFinite(v.duration) && v.duration > 2) {
         try { v.currentTime = Math.max(0, v.duration - 0.4); } catch (e) {}
         adSeekAt = now;
       }
     } catch (e) {}
-  };
-  var snap = function () {
+  };  var snap = function () {
     var el = p();
     if (!el || typeof el.getDuration !== "function") return null;
     var queue = null, qIdx = -1, vd = null;

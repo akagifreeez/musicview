@@ -80,5 +80,5 @@ if (typeof module !== "undefined" && module.exports && !(process.versions && pro
   module.exports = { installHooks: installHooks };
 } else {
   // Electron preload: 実環境へ差し込む(pruneはMUSICVIEW_PRUNE=1でのみ有効)
-  installHooks({ window: window, XMLHttpRequest: XMLHttpRequest }, { prune: process.env.MUSICVIEW_PRUNE === "1" });
+  installHooks({ window: window, XMLHttpRequest: XMLHttpRequest }, { prune: process.env.MUSICVIEW_NO_PRUNE !== "1" });
 }

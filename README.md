@@ -75,7 +75,7 @@ lib/                  純ロジック(URL/キュー/解析/復元)。node --test
 
 4 段構え。いずれも通信の遮断より「再生が壊れないこと」を優先する。
 
-0. データ層の剥ぎ(主役): yt-preload(document-start・main world)がプレイヤーレスポンスから `adPlacements`/`playerAds`/`adSlots` 等を除去する。YouTube のプレイヤーはこれらが無いと広告をスケジュールしないため、広告が鳴る前の情報段階で消える。watch ページに HTML 埋め込みの `ytInitialPlayerResponse` は代入時のプロパティ罠で、SPA 遷移の `/youtubei/v1/player` は fetch/XHR の応答差し替えで剥ぐ(uBlock Origin の json-prune 方式と同じ発想)。実績キーのみに絞り、未知の深掘り削除はしない
+0. データ層の剥ぎ(主役): yt-preload(document-start・main world)がプレイヤーレスポンスから `adPlacements`/`playerAds`/`adSlots` 等を除去する。YouTube のプレイヤーはこれらが無いと広告をスケジュールしないため、広告が鳴る前の情報段階で消える。watch ページに HTML 埋め込みの `ytInitialPlayerResponse` は代入時のプロパティ罠で、SPA 遷移の `/youtubei/v1/player` は JSON.parse フックで剥ぐ(uBlock Origin の json-prune 方式と同じ発想・応答オブジェクト自体には触れない)。実績キーのみに絞り、未知の深掘り削除はしない。なお応答の改変は YouTube 側のストリーミングと相性が変わることがあるため、不調時は `MUSICVIEW_NO_PRUNE=1` で 0 を切って 1〜3 に限定できる
 1. webRequest(EasyList + ABPJF、24時間キャッシュ)で広告ドメイン/パターンを遮断
 2. プレイヤー内スキップ: 0〜1 をすり抜けた広告用の最終防衛線。スキップボタンがある広告はボタンを押す公式経路のみ(強制シークとの競合が遷移を壊すため)、押下直後は遷移中として触らない。スキップ不可の広告だけ出現6秒後にシークを末尾へ飛ばす
 3. CSS でバナー・オーバーレイ広告を非表示

@@ -2090,8 +2090,8 @@ app.whenReady().then(async () => {
     session.fromPartition(PARTITION).setUserAgent(ua);
     console.log("musicview: ua override ->", ua.slice(0, 70));
   } catch (e) { console.error("musicview: ua override failed", e.message); }
-  if (process.env.MUSICVIEW_PRUNE === "1") {
-    console.log("musicview: json-prune ENABLED (MUSICVIEW_PRUNE=1・403ストール再現の実験用)");
+  if (process.env.MUSICVIEW_NO_PRUNE === "1") {
+    console.log("musicview: json-prune OFF (MUSICVIEW_NO_PRUNE=1)");
   }
   // 切り分け用: yt-preload(データ層の広告剥ぎ)を外して起動する
   if (process.env.MUSICVIEW_NO_PRELOAD === "1") {

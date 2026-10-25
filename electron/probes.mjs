@@ -742,13 +742,25 @@ async function runProbeAudio() {
   if (!s?.ok) { app.exit(1); return; }
   ctx.setEqGains(clampGains([12, 2, -2, 0, 2]));
   await applyAudioTo(ctx.site);
-  await sleep(2500);
-  const chk = await execOn(ctx.site, `JSON.stringify({
-    has: !!window.__mvAudio,
-    g0: window.__mvAudio ? window.__mvAudio.bands[0].gain.value : null,
-    g2: window.__mvAudio ? window.__mvAudio.bands[2].gain.value : null,
-    lv: window.__mvCtl ? window.__mvCtl.levels(8) : null
-  })`);
+  // グラフの接続ゲート(ページ安定+再生中)は立ち上がりに時間がかかることがあるため、
+  // has が立ってゲインが実設定値になるまで最大 30 秒待つ
+  let chk = null;
+  for (let i = 0; i < 15; i++) {
+    await sleep(2000);
+    chk = await execOn(ctx.site, `JSON.stringify({
+      has: !!window.__mvAudio,
+      g0: window.__mvAudio ? window.__mvAudio.bands[0].gain.value : null,
+      g2: window.__mvAudio ? window.__mvAudio.bands[2].gain.value : null,
+      lv: window.__mvCtl ? window.__mvCtl.levels(8) : null,
+      dis: window.__mvAudioDisabled === true,
+      fails: window.__mvAudioFails === undefined ? null : window.__mvAudioFails
+    })`);
+    try {
+      const p = JSON.parse(chk);
+      if (p.has && p.g0 === 12) { log("audio: connected after", (i + 1) * 2, "s"); break; }
+      if (p.dis) { log("audio: DISABLED (fails=" + p.fails + ")"); break; }
+    } catch { /* 次へ */ }
+  }
   log("audio:", chk);
   const r = await pollOnce();
   log("viz:", ctx.vizOn, "pump-sent:", r?.ok, "levels-via-renderer:", "see-ui");

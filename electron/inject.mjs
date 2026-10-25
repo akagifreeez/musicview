@@ -128,6 +128,7 @@ export const SITE_BOOTSTRAP = `
           el.loadVideoById(vid);
         }
       }
+      else if (name === "eq") return ctlEq(arg);
       else if (name === "teardownAudio") { hardTeardown(); window.__mvAudioDisabled = true; return "ok"; }
       else return "unknown";
       return "ok";

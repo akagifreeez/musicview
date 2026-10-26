@@ -333,3 +333,42 @@ test("recordEvent: リング 200 件で古いものから落ちる", () => {
   assert.equal(st.events[0].detail, "10");
   assert.equal(st.events.at(-1).detail, "209");
 });
+
+test("アプリ投入後の食い違い(URL=旧曲・プレイヤー=投入曲)は番犬が出ない", () => {
+  // 次曲ボタン等の loadVideoById は URL を変えない。この食い違いを破損扱いして
+  // 旧URLを再読込すると投入が数秒で引き戻される(「次の動画が進まない」退行)
+  const st = createRecoveryState();
+  st.navAt = 40000;                 // 60秒前に画面内遷移(番犬の90秒窓内)
+  const r = stepRecovery(st, okInput({
+    snap: { videoId: VID2, state: 1, time: 5, dur: 200, ad: false },
+    url: `https://www.youtube.com/watch?v=${VID}`,
+    urlVideoId: VID,                // URL は旧曲のまま
+    pageOk: true,
+    appLoadVid: VID2, appLoadAt: 99000,  // 番犬窓の後にアプリが投入済み
+  }));
+  assert.deepEqual(kinds(r), []);
+});
+
+test("ユーザー遷移(URL=新曲)がアプリ投入より後なら従来どおり強制投入", () => {
+  const st = createRecoveryState();
+  st.navAt = 99000;                 // 1秒前にユーザーがクリック(遷移)
+  const r = stepRecovery(st, okInput({
+    snap: { videoId: VID2, state: 1, time: 30, dur: 200, ad: false },
+    urlVideoId: VID,                // URL の方が新しい
+    pageOk: true,
+    appLoadVid: VID2, appLoadAt: 40000,  // 投入は遷移より前
+  }));
+  assert.deepEqual(kinds(r), ["nav-force-load"]);
+});
+
+test("アプリ投入の保護は投入した動画が鳴っている間だけ(別動画なら番犬が出る)", () => {
+  const st = createRecoveryState();
+  st.navAt = 40000;
+  const r = stepRecovery(st, okInput({
+    snap: { videoId: VID2, state: 1, time: 5, dur: 200, ad: false },
+    urlVideoId: VID,
+    pageOk: true,
+    appLoadVid: "zzzzzzzzzzz", appLoadAt: 99000,  // 投入とプレイヤーが不一致
+  }));
+  assert.deepEqual(kinds(r), ["nav-force-load"]);
+});

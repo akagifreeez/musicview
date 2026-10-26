@@ -96,6 +96,11 @@ let bootHasSession = false; // 起動時にセッション Cookie があるか(�
 // 再生異常の監視状態と回復履歴。判定そのものは lib/recovery.mjs の
 // stepRecovery(純関数)が担い、ここは状態の器とアクションの実行だけを持つ
 const rec = createRecoveryState();
+// アプリ自身が execCmd("load"/"loadlist") で投入した動画と時刻。loadVideoById は
+// URL を変えないため「URL=旧曲・プレイヤー=新曲」になるが、これは破損ではなく
+// アプリ起因の食い違い。回復判定器の遷移後番犬が投入を旧URLへ引き戻さないよう伝える
+let appLoadVid = null;
+let appLoadAt = 0;
 let bootAt = 0;             // 起動時刻(診断レポート用)
 const RECOVERY_LOG = (...a) => console.log("musicview:", ...a);
 
@@ -568,6 +573,14 @@ async function snapOf(view) {
 }
 
 async function execCmd(name, arg) {
+  // アプリ主導の投入を記録(回復判定器の遷移後番犬がこれを引き戻さないように)
+  if (name === "load") {
+    appLoadVid = String(arg ?? "");
+    appLoadAt = Date.now();
+  } else if (name === "loadlist") {
+    appLoadVid = String((arg && arg.videoId) ?? "");
+    appLoadAt = Date.now();
+  }
   return await execSite(`(window.__mvCtl ? window.__mvCtl.cmd(${JSON.stringify(name)}, ${JSON.stringify(arg ?? null)}) : "no-ctl")`);
 }
 
@@ -1100,7 +1113,7 @@ async function pollOnce() {
     urlList = u.searchParams.get("list");
   } catch { /* URL 取得失敗は無視 */ }
   let pageOk = null;
-  if (needsPageCheck(rec, { now: nowMs, urlVideoId, videoId: snap.videoId })) {
+  if (needsPageCheck(rec, { now: nowMs, urlVideoId, videoId: snap.videoId, appLoadVid, appLoadAt })) {
     pageOk = await execSite('!!document.querySelector("ytd-watch-flexy, ytd-rich-item-renderer, yt-lockup-view-model")').catch(() => null);
   }
   await runRecoveryActions(stepRecovery(rec, {
@@ -1109,6 +1122,7 @@ async function pollOnce() {
     urlVideoId, urlList, pageOk,
     xfadeOff: xfadeSec <= 0, loopOn, xfadeCooldownActive: nowMs < xfadeCooldownUntil,
     nextId: queueNextId(snap),
+    appLoadVid, appLoadAt,
   }).actions);
 
   // Discord Rich Presence(曲/再生状態が変わったときだけ送る)

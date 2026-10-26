@@ -29,7 +29,7 @@ process.on("uncaughtException", (e) => {
 process.on("unhandledRejection", (e) => {
   console.error("musicview: unhandled rejection (続行):", String((e && (e.reason && (e.reason.stack || e.reason.message))) || e).slice(0, 400));
 });
-const { AdblockEngine } = require("./adblock.cjs");
+const { AdblockEngine, FILTER_ALLOW_PREFIX } = require("./adblock.cjs");
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -109,7 +109,9 @@ let titlesFetching = 0;
 const adblock = new AdblockEngine();
 let adblockReady = false;
 
-// EasyList が無い時間の保険(ドメイン単位)
+// EasyList が無い時間の保険(ドメイン単位)。フィルタ未ロード時のみ使う:
+// 読み込み済みなら EasyList 本体(+例外ルール)に任せ、この正規表現が
+// 例外(@@)を打ち消して誤ブロックを起こさないようにする
 const AD_URL_RE = new RegExp([
   "doubleclick\\.net",
   "googlesyndication\\.com",
@@ -123,30 +125,36 @@ const AD_URL_RE = new RegExp([
   "securepubads",
 ].join("|"), "i");
 
+// 取得元(先頭から順に試す)。easylist.to は落ちていることがあるため GitHub ミラーを置く
 const FILTER_SOURCES = [
-  "https://easylist.to/easylist/easylist.txt",
-  "https://raw.githubusercontent.com/k2jp/abp-japanese-filters/master/abpjf.txt",
+  [
+    "https://easylist.to/easylist/easylist.txt",
+    "https://raw.githubusercontent.com/easylist/easylist/master/easylist.txt",
+  ],
+  [
+    "https://raw.githubusercontent.com/k2jp/abp-japanese-filters/master/abpjf.txt",
+  ],
 ];
-// YouTube 自社の再生計測は通す(視聴履歴がブロックされるとミックスが育たなくなるため)。
-// 広告配信系(pagead / doubleclick)はブロックのまま
-const FILTER_ALLOW_PREFIX = `
-@@||www.youtube.com/api/stats/$~third-party
-@@||www.youtube.com/ptracking/$~third-party
-@@||www.youtube.com/youtubei/$~third-party
-`;
+// YouTube 自社の計測を通す例外プリフィクスは adblock.cjs の FILTER_ALLOW_PREFIX
+// (本体・filter-battery・テストで同じ定義を共有する)
 const FILTERS_MAX_AGE = 24 * 60 * 60 * 1000;
 
 async function downloadFilters() {
   await fs.mkdir(FILTERS_DIR, { recursive: true });
   let combined = "";
-  for (const url of FILTER_SOURCES) {
-    try {
-      const res = await net.fetch(url, { signal: AbortSignal.timeout(30000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      combined += await res.text() + "\n";
-    } catch (e) {
-      console.error("musicview: filter download failed:", url.slice(0, 60), e.message);
+  for (const candidates of FILTER_SOURCES) {
+    let got = null;
+    for (const url of candidates) {
+      try {
+        const res = await net.fetch(url, { signal: AbortSignal.timeout(30000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        got = await res.text();
+        break;
+      } catch (e) {
+        console.error("musicview: filter download failed:", url.slice(0, 60), e.message);
+      }
     }
+    if (got != null) combined += got + "\n";
   }
   if (!combined) throw new Error("no filter list downloaded");
   await fs.writeFile(path.join(FILTERS_DIR, "combined.txt"), combined, "utf8");
@@ -195,8 +203,9 @@ function installAdblock(ses) {
         callback({ cancel: true });
         return;
       }
-    }
-    if (AD_URL_RE.test(url)) {
+    } else if (AD_URL_RE.test(url)) {
+      // 保険はフィルタ未ロード時のみ。ロード済みなら例外(@@)ルールが
+      // 優先される通常経路に一本化する(頑固な再ブロックによる誤ブロック防止)
       blockedCount++;
       noteBlocked(url, "domain");
       callback({ cancel: true });
@@ -204,6 +213,18 @@ function installAdblock(ses) {
     }
     callback({});
   });
+}
+
+// フィルタの取得スケジュール。初回失敗(オフライン等)でも5分再試行で諦めず、
+// ロード済みなら6時間ごとに鮮度を確認して24時間経過分を更新する
+// (音楽プレイヤーは数日起動しっぱなしのため、起動時1回ではリストが古びる)
+function scheduleFilterLoad() {
+  loadFilters()
+    .then((ok) => {
+      if (ok) setInterval(() => { loadFilters().catch(() => {}); }, 6 * 60 * 60 * 1000);
+      else setTimeout(scheduleFilterLoad, 5 * 60 * 1000);
+    })
+    .catch(() => setTimeout(scheduleFilterLoad, 5 * 60 * 1000));
 }
 
 // ── サイトビュー ────────────────────────────────
@@ -1601,7 +1622,7 @@ app.whenReady().then(async () => {
     console.log("musicview: adblock OFF (MUSICVIEW_NO_ADBLOCK=1)");
   } else {
     installAdblock(session.fromPartition(PARTITION));
-    loadFilters().catch(() => {}); // 背景ロード(初回は DL に時間がかかる)
+    scheduleFilterLoad(); // 背景ロード(初回は DL に時間がかかる。失敗時も再試行する)
   }
   // Electron UAのままだとYouTubeのボット判定が動画データURLを403で拒否することが
   // あるため、実Chrome相当のUAに寄せる(Chromiumのバージョンは実値)

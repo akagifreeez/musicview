@@ -20,10 +20,11 @@ try {
 function installHooks(env, opts) {
   const win = env.window;
   const XHR = env.XMLHttpRequest;
-  // pruneはデフォルトOFF。/player応答の改変がYouTubeのSABR系ストリーミングと
-  // 相性が悪く、データURLが403で拒否されて「クリック後に読み込みが止まる」原因に
-  // なったため(2026-10-24実走)。MUSICVIEW_PRUNE=1 で実験的に有効化できる。
-  // 広告は従来どおり skipTick(スキップ/シーク)+CSS隠し+ネットワーク遮断で処理する
+  // pruneはデフォルトON(READMEの第0層)。かつて応答オブジェクトの書き換えが
+  // SABR系ストリーミングのURL 403(クリック後に読み込みが止まる)を起こしたため、
+  // 応答には一切触れずパース結果のルートキーだけを剥ぐ方式に置き換えてある
+  // (2026-10-24実走で確認・uBOのjson-pruneと同じ筋)。不調時は
+  // MUSICVIEW_NO_PRUNE=1 で無効化でき、その後は skipTick+CSS隠し+遮断が担う
   const prune = !!(opts && opts.prune);
   const stats = { inline: 0, parse: 0, err: 0 };
   try { win.__mvPrune = stats; } catch (e) {}
@@ -92,6 +93,6 @@ if (typeof module !== "undefined" && module.exports && !(process.versions && pro
   // Node(テスト): 実配線は行わず、差し込み口だけ公開する
   module.exports = { installHooks: installHooks };
 } else {
-  // Electron preload: 実環境へ差し込む(pruneはMUSICVIEW_PRUNE=1でのみ有効)
+  // Electron preload: 実環境へ差し込む(pruneはデフォルトON、MUSICVIEW_NO_PRUNE=1で無効)
   installHooks({ window: window, XMLHttpRequest: XMLHttpRequest }, { prune: process.env.MUSICVIEW_NO_PRUNE !== "1" });
 }

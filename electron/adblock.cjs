@@ -14,6 +14,18 @@
 
 const MAX_RULES = 120_000;
 
+// YouTube 自社の再生計測は通す(視聴履歴がブロックされるとミックスが育たなくなるため)。
+// 広告配信系(pagead / doubleclick)はブロックのまま。
+// ptracking の実URLは「/ptracking?…」でスラッシュを挟まないため、
+// 「/」終端のパターンでは例外が効かない(EasyList の
+// ||youtube.com/ptracking?$domain=youtube.com に負けて履歴計測が死んだ)
+const FILTER_ALLOW_PREFIX = [
+  "@@||www.youtube.com/api/stats/$~third-party",
+  "@@||www.youtube.com/ptracking$~third-party",
+  "@@||www.youtube.com/youtubei/$~third-party",
+  "", // 末尾に改行を保証(連結先の先頭行と繋がると最後の例外ルールが壊れる)
+].join("\n");
+
 // filter → RegExp 変換(Adblock 構文のサブセット)
 function ruleToRegExp(pattern) {
   // || = ドメインアンカー: ホスト名の途中で始まらない( . を前に要求)。
@@ -161,10 +173,11 @@ class AdblockEngine {
 
   loadFromText(text) {
     const block = [], allow = [];
-    let firstLine = true;
+    // 前回ロード分の ruleCount を引きずると再ロード(定期リフレッシュ)で
+    // 上限到達と誤判定され、8万件超のリストが3分の1に刈り込まれた。毎回0から数える
+    this.ruleCount = 0;
     for (const raw of text.split("\n")) {
-      if (firstLine) { firstLine = false; }
-      if (this.ruleCount + block.length + allow.length > MAX_RULES) break;
+      if (block.length + allow.length > MAX_RULES) break;
       const line = raw.trim();
       if (line.startsWith("! Version:")) this.listVersion = line.slice(10).trim();
       const parsed = this.parseLine(line);
@@ -194,13 +207,13 @@ class AdblockEngine {
     if (this.hasMatch(this.allowIndex, this.allowAny, lower)) {
       for (const r of this.candidates(this.allowIndex, this.allowAny, lower)) {
         if (!r.re.test(lower)) continue;
-        if (!this.optionsMatch(r.options, lower, mapped, isThird, sourceDomain)) continue;
+        if (!this.optionsMatch(r.options, lower, mapped, isThird, sourceDomain, true)) continue;
         return false;
       }
     }
     for (const r of this.candidates(this.blockIndex, this.blockAny, lower)) {
       if (!r.re.test(lower)) continue;
-      if (!this.optionsMatch(r.options, lower, mapped, isThird, sourceDomain)) continue;
+      if (!this.optionsMatch(r.options, lower, mapped, isThird, sourceDomain, false)) continue;
       return true;
     }
     return false;
@@ -230,10 +243,18 @@ class AdblockEngine {
     return false;
   }
 
-  optionsMatch(opt, url, resourceType, isThird, sourceDomain) {
+  optionsMatch(opt, url, resourceType, isThird, sourceDomain, isAllow) {
     if (!opt) return true;
     if (opt.types && !opt.types.includes(resourceType)) return false;
-    if (opt.thirdParty !== null && isThird !== null && opt.thirdParty !== isThird) return false;
+    if (opt.thirdParty !== null) {
+      if (isThird === null) {
+        // 参照元が取れない要求は第三者判定が不明。ブロック側は誤ブロックを
+        // 避けて見送る(取りこぼし優先)。例外側は緩く適用する(偽免除≪偽ブロック)
+        if (!isAllow) return false;
+      } else if (opt.thirdParty !== isThird) {
+        return false;
+      }
+    }
     if (opt.domains || opt.domainsInverse) {
       if (!sourceDomain) return false; // 参照先が不明なら domain 条件付きは適用しない
       // Adblock 規格の domain= は「このルールが適用されるページ(参照元)」の指定。
@@ -254,4 +275,4 @@ class AdblockEngine {
   }
 }
 
-module.exports = { AdblockEngine };
+module.exports = { AdblockEngine, FILTER_ALLOW_PREFIX };

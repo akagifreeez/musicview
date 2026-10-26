@@ -29,7 +29,9 @@ export const SITE_BOOTSTRAP = `
           if (adQuietTicks >= 2) {
             adMuted = false;
             adQuietTicks = 0;
-            try { var p2 = p(); if (p2) { if (p2.setVolume) p2.setVolume(adPrevVol); if (p2.unMute) p2.unMute(); } } catch (e) {}
+            // 音量の復帰は「まだ0のまま」のときだけ。広告中にユーザーが音量を
+            // 変えていたらそれを上書きしない(ミュート解除は常に戻す)
+            try { var p2 = p(); if (p2) { if (p2.getVolume && p2.getVolume() === 0 && adPrevVol > 0) p2.setVolume(adPrevVol); if (p2.unMute) p2.unMute(); } } catch (e) {}
           }
         } else {
           adQuietTicks = 0;

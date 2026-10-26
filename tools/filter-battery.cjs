@@ -1,15 +1,10 @@
 // プレイヤー/ページ動作に必須のURLが広告フィルタで誤ブロックされていないかの一括テスト
 "use strict";
-const { AdblockEngine } = require("../electron/adblock.cjs");
+const { AdblockEngine, FILTER_ALLOW_PREFIX } = require("../electron/adblock.cjs");
 const fs = require("node:fs");
 
 const eng = new AdblockEngine();
-const prefix = [
-  "@@||www.youtube.com/api/stats/$~third-party",
-  "@@||www.youtube.com/ptracking/$~third-party",
-  "@@||www.youtube.com/youtubei/$~third-party",
-].join("\n");
-eng.loadFromText(prefix + "\n" + fs.readFileSync("data/filters/combined.txt", "utf8"));
+eng.loadFromText(FILTER_ALLOW_PREFIX + "\n" + fs.readFileSync("data/filters/combined.txt", "utf8"));
 console.log("rules:", eng.ruleCount);
 
 const list = [
@@ -26,6 +21,8 @@ const list = [
   ["screenshot(サムネ)", "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg", "image"],
   ["補助スクリプトspf", "https://www.youtube.com/yts/jsbin/spf.vflset/spf.js", "script"],
   ["desktop polyfill", "https://www.youtube.com/yts/jsbin/polymer-nodejs.vflset/polymer-nodejs.js", "script"],
+  ["api/stats/watchtime(履歴計測)", "https://www.youtube.com/api/stats/watchtime?ver=2&v=dQw4w9WgXcQ&cmt=1", "xmlhttprequest"],
+  ["ptracking(履歴計測)", "https://www.youtube.com/ptracking?html5=1&video_id=dQw4w9WgXcQ&cpn=abc", "xmlhttprequest"],
 ];
 for (const [label, u, type] of list) {
   let r;

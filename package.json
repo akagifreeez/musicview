@@ -1,7 +1,7 @@
 {
   "name": "musicview",
   "type": "module",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "YouTube 動画を音楽として聴くことに特化したデスクトッププレイヤー(実サイトラップ+広告ブロック)",
   "main": "electron/main.mjs",
   "author": "akagifreeez",
